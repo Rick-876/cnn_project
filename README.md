@@ -48,6 +48,9 @@ textcnn_model.pth
 - **Calibrated Confidence** — Platt scaling-based confidence calibration, adaptive blending based on model agreement
 - **Topical Relevance Gate** — Jaccard similarity-based filtering to catch off-topic responses
 - **Improved Scoring System** — Multi-source adaptive blending (CNN, similarity features, ensemble, question models)
+- **Content Correctness Check** — Keyword presence with WordNet synonyms, concept coverage, word order analysis
+- **Grammar Tolerance Detection** — POS-based grammar assessment, tolerance scoring for non-native speakers
+- **Word Order Analysis** — LCS-based detection of scrambled-but-correct answers, content override scoring
 
 ---
 
@@ -108,6 +111,8 @@ cnn_project/
 ├── question_models.py         # Question-specific model training
 ├── reference_answers.py       # Reference answer database & similarity
 ├── scoring_improvements.py    # Calibration & adaptive scoring
+├── content_correctness.py     # Keyword matching, synonym detection, word order analysis
+├── grammar_detection.py       # POS-based grammar tolerance scoring
 ├── backend_enhanced.py        # Enhanced FastAPI backend (configurable)
 │
 ├─ DATA & MODELS
@@ -816,6 +821,21 @@ print(f"Missing keywords: {result['missing_keywords']}")  # ['optimize']
 # Check for key concepts (nouns/verbs only)
 concepts = checker.check_key_concepts(student_answer, reference_answer)
 print(f"Concept coverage: {concepts['concept_coverage']:.1%}")  # 85%
+
+# NEW: Check word order (detects scrambled-but-correct answers)
+order = checker.check_word_order(
+    student_answer="energy the mitochondria cell produces for",
+    reference_answer="the mitochondria produces energy for the cell"
+)
+print(f"Order score: {order['order_score']:.1%}")  # 50% (words scrambled)
+print(f"Is scrambled: {order['is_scrambled']}")  # True
+print(f"Content preserved: {order['content_preserved']}")  # True
+
+# NEW: Compute content override score for scrambled answers
+override = checker.compute_content_override_score(student_answer, reference_answer)
+print(f"Override score: {override['override_score']:.1%}")  # 85%
+print(f"Should boost: {override['should_boost']}")  # True
+print(f"Boost amount: {override['boost_amount']:.2f}")  # 0.35
 ```
 
 **Features:**
@@ -824,6 +844,8 @@ print(f"Concept coverage: {concepts['concept_coverage']:.1%}")  # 85%
 - **Concept Coverage** — Measure presence of key ideas
 - **Tolerance** — Accept morphological variations and synonyms
 - **No Penalty for Grammar** — Focus on content, not structure
+- **Word Order Analysis** — LCS-based detection of scrambled answers (all words present but wrong order)
+- **Content Override Scoring** — Boost scores when content is correct despite poor structure
 
 **Benefits:**
 - Recognize correct answers with alternative phrasing
