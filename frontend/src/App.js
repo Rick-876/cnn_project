@@ -324,7 +324,7 @@ function AnswerInput({ question, onResult, onError }) {
 function ResultsCard({ result, maxMarks }) {
   if (!result) return null;
 
-  const { score, confidence, feedback } = result;
+  const { score, confidence, feedback, reference_answer } = result;
   const scorePct = Math.min((score / maxMarks) * 100, 100);
 
   let scoreClass = 'score-low';
@@ -390,6 +390,17 @@ function ResultsCard({ result, maxMarks }) {
           <p className="feedback-text">{feedback}</p>
         </div>
       </div>
+
+      {/* Reference Answer */}
+      {reference_answer && (
+        <div className="reference-box">
+          <span className="reference-icon">📚</span>
+          <div>
+            <p className="reference-heading">Reference Answer</p>
+            <p className="reference-text">{reference_answer}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

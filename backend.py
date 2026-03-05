@@ -315,6 +315,7 @@ class PredictResponse(BaseModel):
     score: float
     confidence: float
     feedback: str
+    reference_answer: str
 
 
 @app.on_event("startup")
@@ -465,4 +466,4 @@ def predict(req: PredictRequest):
         elif grammar_assessment['violations']['severity'] >= 2:
             feedback += " Note: While your grammar could be stronger, your content is clear."
 
-    return PredictResponse(score=score_display, confidence=confidence, feedback=feedback)
+    return PredictResponse(score=score_display, confidence=confidence, feedback=feedback, reference_answer=reference)
