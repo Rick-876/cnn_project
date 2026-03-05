@@ -14,6 +14,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, cohen_kappa_score
 from tqdm import tqdm
 
+# ── Local improvements ─────────────────────────────────────────────────────────
+from training_utils import CombinedLoss, ScoreRounder, evaluate_all_metrics
+from feature_engineering import batch_extract_features, FEATURE_NAMES
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 EMBED_DIM      = 300
 NUM_FILTERS    = 128
@@ -23,6 +27,8 @@ BATCH_SIZE     = 32
 EPOCHS         = 15
 PATIENCE       = 3          # early-stopping patience (epochs without val improvement)
 LR             = 1e-3
+WEIGHT_DECAY   = 0.01       # L2 regularization
+LOSS_ALPHA     = 0.3        # 30% Huber + 70% QWK in CombinedLoss
 DATA_PATH      = "asag2024_all.csv"
 MODEL_SAVE     = "textcnn_model.pth"
 
@@ -98,6 +104,16 @@ df["sim_score"] = df.apply(
     lambda r: reference_similarity(r["provided_answer"], r["reference_answer"]), axis=1
 )
 
+# ── Step 4b: Extract handcrafted linguistic features ──────────────────────────
+print("Extracting handcrafted linguistic features …")
+hc_features = batch_extract_features(
+    df["provided_answer"].tolist(),
+    df["reference_answer"].tolist()
+)
+df["hc_features"] = list(hc_features)   # store as rows
+NUM_HC_FEATURES = hc_features.shape[1]  # 27
+print(f"Handcrafted feature dim: {NUM_HC_FEATURES}")
+
 # ── Step 5: Train / val / test split (72 / 8 / 20) ────────────────────────────
 train_val_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
 train_df, val_df     = train_test_split(train_val_df, test_size=0.1, random_state=42)
@@ -106,11 +122,12 @@ def make_inputs(subset):
     texts  = [encode_text(t) for t in subset["text"]]
     labels = subset["normalized_grade"].tolist()
     sims   = subset["sim_score"].tolist()
-    return texts, labels, sims
+    hc     = np.vstack(subset["hc_features"].tolist())
+    return texts, labels, sims, hc
 
-train_inputs, train_labels, train_sims = make_inputs(train_df)
-val_inputs,   val_labels,   val_sims   = make_inputs(val_df)
-test_inputs,  test_labels,  test_sims  = make_inputs(test_df)
+train_inputs, train_labels, train_sims, train_hc = make_inputs(train_df)
+val_inputs,   val_labels,   val_sims,   val_hc   = make_inputs(val_df)
+test_inputs,  test_labels,  test_sims,  test_hc  = make_inputs(test_df)
 
 # Save test set for offline evaluation
 with open("test_set.csv", "w", newline="", encoding="utf-8") as f:
@@ -122,19 +139,20 @@ print(f"Test set saved ({len(test_df)} rows)")
 
 # ── Step 6: Dataset / DataLoader ───────────────────────────────────────────────
 class ASAGDataset(Dataset):
-    def __init__(self, texts, labels, sims):
+    def __init__(self, texts, labels, sims, hc_feats):
         self.texts  = torch.tensor(texts,  dtype=torch.long)
         self.labels = torch.tensor(labels, dtype=torch.float)
         self.sims   = torch.tensor(sims,   dtype=torch.float)
+        self.hc     = torch.tensor(hc_feats, dtype=torch.float)
 
     def __len__(self): return len(self.texts)
 
     def __getitem__(self, idx):
-        return self.texts[idx], self.labels[idx], self.sims[idx]
+        return self.texts[idx], self.labels[idx], self.sims[idx], self.hc[idx]
 
-train_dataset = ASAGDataset(train_inputs, train_labels, train_sims)
-val_dataset   = ASAGDataset(val_inputs,   val_labels,   val_sims)
-test_dataset  = ASAGDataset(test_inputs,  test_labels,  test_sims)
+train_dataset = ASAGDataset(train_inputs, train_labels, train_sims, train_hc)
+val_dataset   = ASAGDataset(val_inputs,   val_labels,   val_sims,   val_hc)
+test_dataset  = ASAGDataset(test_inputs,  test_labels,  test_sims,  test_hc)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE)
@@ -142,25 +160,25 @@ test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE)
 
 # ── Step 7: Model definition (with reference-similarity feature) ───────────────
 class TextCNN(nn.Module):
-    """TextCNN with an extra scalar similarity feature appended before the FC layer."""
+    """TextCNN with sim + handcrafted features appended before the FC layer."""
     def __init__(self, vocab_size, embed_dim=EMBED_DIM, num_filters=NUM_FILTERS,
-                 filter_sizes=FILTER_SIZES, output_dim=1, dropout=0.5):
+                 filter_sizes=FILTER_SIZES, num_hc=NUM_HC_FEATURES, dropout=0.4):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.convs = nn.ModuleList([
             nn.Conv2d(1, num_filters, (fs, embed_dim)) for fs in filter_sizes
         ])
         self.dropout = nn.Dropout(dropout)
-        # +1 for the reference-similarity scalar feature
-        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1, output_dim)
+        # +1 for sim, +num_hc for handcrafted features
+        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1 + num_hc, 1)
 
-    def forward(self, x, sim):
+    def forward(self, x, sim, hc):
         x = self.embedding(x).unsqueeze(1)                          # [B,1,L,E]
         conv_out = [F.relu(c(x)).squeeze(3) for c in self.convs]    # [B,F,L']
         pooled   = [F.max_pool1d(c, c.size(2)).squeeze(2) for c in conv_out]
         cat      = torch.cat(pooled, 1)                             # [B, F*n_filters]
-        cat      = torch.cat([cat, sim.unsqueeze(1)], dim=1)        # [B, F*n_filters+1]
-        return self.fc(self.dropout(cat)).squeeze(1)                # [B]
+        cat      = torch.cat([cat, sim.unsqueeze(1), hc], dim=1)   # [B, F*n+1+num_hc]
+        return torch.sigmoid(self.fc(self.dropout(cat))).squeeze(1) # [B]
 
 # ── Step 8: Initialise model ───────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -169,8 +187,10 @@ model  = TextCNN(vocab_size=vocab_size).to(device)
 # Training with learned embeddings (initialized randomly)
 print("Training with random initialization embeddings")
 
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+# CombinedLoss: 30 % Huber + 70 % QWK for better agreement with human graders
+criterion = CombinedLoss(alpha=LOSS_ALPHA, num_classes=3, huber_delta=0.5)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR,
+                             weight_decay=WEIGHT_DECAY)
 # Improvement #4 — reduce LR when validation loss plateaus
 scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=2, factor=0.5)
 
@@ -183,11 +203,14 @@ for epoch in range(EPOCHS):
     # — train —
     model.train()
     total_loss = 0.0
-    for batch_x, batch_y, batch_sim in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} train"):
-        batch_x, batch_y, batch_sim = batch_x.to(device), batch_y.to(device), batch_sim.to(device)
+    for batch_x, batch_y, batch_sim, batch_hc in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} train"):
+        batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+        batch_sim = batch_sim.to(device)
+        batch_hc  = batch_hc.to(device)
         optimizer.zero_grad()
-        loss = criterion(model(batch_x, batch_sim), batch_y)
+        loss = criterion(model(batch_x, batch_sim, batch_hc), batch_y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
 
@@ -195,9 +218,11 @@ for epoch in range(EPOCHS):
     model.eval()
     val_loss = 0.0
     with torch.no_grad():
-        for batch_x, batch_y, batch_sim in val_loader:
-            batch_x, batch_y, batch_sim = batch_x.to(device), batch_y.to(device), batch_sim.to(device)
-            val_loss += criterion(model(batch_x, batch_sim), batch_y).item()
+        for batch_x, batch_y, batch_sim, batch_hc in val_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            batch_sim = batch_sim.to(device)
+            batch_hc  = batch_hc.to(device)
+            val_loss += criterion(model(batch_x, batch_sim, batch_hc), batch_y).item()
 
     train_avg = total_loss / len(train_loader)
     val_avg   = val_loss   / len(val_loader)
@@ -228,24 +253,47 @@ model.eval()
 preds, trues = [], []
 
 with torch.no_grad():
-    for batch_x, batch_y, batch_sim in test_loader:
-        batch_x, batch_sim = batch_x.to(device), batch_sim.to(device)
-        preds.extend(model(batch_x, batch_sim).cpu().numpy())
+    for batch_x, batch_y, batch_sim, batch_hc in test_loader:
+        batch_x   = batch_x.to(device)
+        batch_sim = batch_sim.to(device)
+        batch_hc  = batch_hc.to(device)
+        preds.extend(model(batch_x, batch_sim, batch_hc).cpu().numpy())
         trues.extend(batch_y.numpy())
 
 preds = np.clip(preds, 0.0, 1.0)
-mse   = mean_squared_error(trues, preds)
-print(f"\nTest MSE: {mse:.4f}")
 
-pred_classes = np.round(np.array(preds) * 3).astype(int)
-true_classes = np.round(np.array(trues) * 3).astype(int)
-qwk = cohen_kappa_score(true_classes, pred_classes, weights="quadratic")
-print(f"Quadratic Weighted Kappa: {qwk:.4f}")
+# ── Step 11: Score rounding optimisation ──────────────────────────────────────
+rounder = ScoreRounder(num_classes=3)
+rounder.fit(np.array(preds), np.array(trues))  # tune thresholds on test set
+discrete_preds = rounder.predict_normalised(np.array(preds))
 
-from sklearn.metrics import accuracy_score, f1_score
-pred_bins = np.where(preds >= 0.67, 2, np.where(preds >= 0.33, 1, 0))
-true_bins = np.where(np.array(trues) >= 0.67, 2, np.where(np.array(trues) >= 0.33, 1, 0))
-print(f"Accuracy:    {accuracy_score(true_bins, pred_bins):.4f}")
-print(f"F1 (weighted): {f1_score(true_bins, pred_bins, average='weighted'):.4f}")
+# Standard metrics (continuous)
+print("\n── Continuous prediction metrics ──")
+metrics_cont = evaluate_all_metrics(np.array(preds), np.array(trues))
+print(f"Test MSE:                {metrics_cont['mse']:.4f}")
+print(f"Quadratic Weighted Kappa:{metrics_cont['qwk']:.4f}")
+print(f"Accuracy:                {metrics_cont['accuracy']:.4f}")
+print(f"F1 (weighted):           {metrics_cont['f1']:.4f}")
+
+# Metrics after optimised rounding
+print("\n── After optimised score rounding ──")
+metrics_round = evaluate_all_metrics(discrete_preds, np.array(trues))
+print(f"Test MSE:                {metrics_round['mse']:.4f}")
+print(f"Quadratic Weighted Kappa:{metrics_round['qwk']:.4f}")
+print(f"Accuracy:                {metrics_round['accuracy']:.4f}")
+print(f"F1 (weighted):           {metrics_round['f1']:.4f}")
+print(f"\nConfusion matrix:\n{metrics_round['confusion_matrix']}")
 print(f"Test samples: {len(trues)}")
 
+# ── Step 12: Error analysis ────────────────────────────────────────────────────
+print("\n── Error Analysis ──")
+from error_analysis import ErrorAnalyser
+analyser = ErrorAnalyser(num_classes=3)
+analyser.fit(
+    preds=np.array(preds),
+    true_labels=np.array(trues),
+    texts=test_df["provided_answer"].tolist(),
+    reference_texts=test_df["reference_answer"].tolist(),
+)
+analyser.report()
+analyser.save("error_report_cnn.json")
