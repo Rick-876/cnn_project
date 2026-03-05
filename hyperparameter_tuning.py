@@ -274,8 +274,21 @@ def run_tuning(target: str, n_trials: int, model_name: str = None,
     except Exception:
         df = pd.read_csv(data_path)
 
+    # Map CSV columns to expected format
+    if 'Question' in df.columns:
+        df = df.rename(columns={
+            'Question': 'question',
+            'Student Answer': 'provided_answer',
+            'Reference Answer': 'reference_answer',
+            'Human Score/Grade': 'normalized_grade'
+        })
+
     required = ['question', 'reference_answer', 'provided_answer',
                 'normalized_grade']
+    # Normalize grade to [0, 1] if needed
+    if df['normalized_grade'].max() > 1.0:
+        df['normalized_grade'] = df['normalized_grade'] / df['normalized_grade'].max()
+    
     df = df[required].fillna({"question": "", "reference_answer": "",
                                "provided_answer": "", "normalized_grade": 0.0})
 

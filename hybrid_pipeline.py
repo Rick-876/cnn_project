@@ -256,10 +256,21 @@ def run_kfold_training(cfg: dict):
     except Exception:
         df = pd.read_csv(cfg['data_path'])
 
+    # Map CSV columns to expected format
+    if 'Question' in df.columns:
+        df = df.rename(columns={
+            'Question': 'question',
+            'Student Answer': 'provided_answer',
+            'Reference Answer': 'reference_answer',
+            'Human Score/Grade': 'normalized_grade'
+        })
+
     required = ["question", "reference_answer", "provided_answer",
                 "normalized_grade"]
-    if not all(c in df.columns for c in required):
-        df.columns = required[:len(df.columns)]
+    # Normalize grade to [0, 1] if needed
+    if df['normalized_grade'].max() > 1.0:
+        df['normalized_grade'] = df['normalized_grade'] / df['normalized_grade'].max()
+    
     df = df[required].fillna(
         {"question": "", "reference_answer": "", "provided_answer": "",
          "normalized_grade": 0.0}
