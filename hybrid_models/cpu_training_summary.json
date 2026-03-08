@@ -1,0 +1,57 @@
+{
+  "config": {
+    "encoder_name": "distilbert-base-uncased",
+    "max_length": 128,
+    "extract_batch": 64,
+    "train_batch": 128,
+    "epochs": 20,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "dropout": 0.3,
+    "folds": 3,
+    "loss_alpha": 0.3,
+    "num_classes": 3,
+    "data_path": "asag2024_all.csv",
+    "save_dir": "hybrid_models",
+    "seed": 42
+  },
+  "fold_results": [
+    {
+      "fold": 1,
+      "best_val_qwk": 0.4566459953564298,
+      "final_qwk": 0.48400165744975465,
+      "accuracy": 0.5533175355450237,
+      "f1": 0.5385625889296565,
+      "mse": 0.17479890400934014
+    },
+    {
+      "fold": 2,
+      "best_val_qwk": 0.4791304310177108,
+      "final_qwk": 0.5040530315651192,
+      "accuracy": 0.5664625715978668,
+      "f1": 0.5593616564985212,
+      "mse": 0.16465234508547016
+    },
+    {
+      "fold": 3,
+      "best_val_qwk": 0.4614581870771626,
+      "final_qwk": 0.4819142492871623,
+      "accuracy": 0.5443412996247284,
+      "f1": 0.5290531328851192,
+      "mse": 0.18612642264143922
+    }
+  ],
+  "oof_metrics": {
+    "qwk": 0.46585353564127063,
+    "accuracy": 0.5429229756418696,
+    "f1": 0.4847543925991248,
+    "mse": 0.17743388170508542
+  },
+  "mean_metrics": {
+    "qwk": 0.48998964610067874,
+    "accuracy": 0.5547071355892063,
+    "f1": 0.5423257927710989,
+    "mse": 0.1751925572454165
+  },
+  "training_time_min": 1.2
+}

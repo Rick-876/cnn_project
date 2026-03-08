@@ -499,6 +499,8 @@ def parse_args():
     p.add_argument('--epochs',  type=int,   default=DEFAULTS['epochs'])
     p.add_argument('--batch',   type=int,   default=DEFAULTS['batch_size'])
     p.add_argument('--lr',      type=float, default=DEFAULTS['lr'])
+    p.add_argument('--max_len', type=int,   default=DEFAULTS['max_length'],
+                   help='Maximum token sequence length')
     p.add_argument('--dropout', type=float, default=DEFAULTS['dropout'])
     p.add_argument('--alpha',   type=float, default=DEFAULTS['loss_alpha'],
                    help='Weight for Huber loss (1-alpha for QWK loss)')
@@ -518,6 +520,7 @@ if __name__ == '__main__':
         'folds':       args.folds,
         'epochs':      args.epochs,
         'batch_size':  args.batch,
+        'max_length':  args.max_len,
         'lr':          args.lr,
         'dropout':     args.dropout,
         'loss_alpha':  args.alpha,

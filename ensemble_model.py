@@ -271,3 +271,110 @@ def aggregate_metrics(metric_dicts: List[Dict]) -> Dict:
             aggregated[f'{key}_max'] = float(np.max(values))
     
     return aggregated
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hybrid Encoder Ensemble Member
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HybridEncoderMember:
+    """Wrapper that turns a HybridSemanticEncoder into an ensemble member.
+
+    Usage:
+        member = HybridEncoderMember(model, vocab, device)
+        preds = member.predict(student_texts, reference_texts, hc_feats)
+    """
+
+    def __init__(self, model, vocab: Dict[str, int],
+                 device: torch.device, max_len: int = 100):
+        self.model = model
+        self.vocab = vocab
+        self.device = device
+        self.max_len = max_len
+        self.model.eval()
+
+    @torch.no_grad()
+    def predict(self, student_texts: List[str], reference_texts: List[str],
+                hc_features: np.ndarray) -> np.ndarray:
+        """Run inference and return score predictions."""
+        import re as _re
+
+        def _encode(text: str) -> List[int]:
+            tokens = _re.findall(r"\\w+", text.lower())[:self.max_len]
+            ids = [self.vocab.get(t, 0) for t in tokens]
+            ids += [0] * (self.max_len - len(ids))
+            return ids
+
+        s_ids = torch.tensor(
+            [_encode(t) for t in student_texts], dtype=torch.long,
+        ).to(self.device)
+        r_ids = torch.tensor(
+            [_encode(t) for t in reference_texts], dtype=torch.long,
+        ).to(self.device)
+        hc = torch.tensor(hc_features, dtype=torch.float32).to(self.device)
+
+        out = self.model(s_ids, r_ids, student_texts, reference_texts, hc)
+        return out["score"].cpu().numpy()
+
+
+class MultiModelEnsemble:
+    """Ensemble that combines HybridGrader, HybridSemanticEncoder, TextCNN,
+    and any other scoring model via weighted blending.
+
+    Args:
+        method: Aggregation method ('weighted_average', 'median', 'voting').
+    """
+
+    def __init__(self, method: str = "weighted_average"):
+        self.members: Dict[str, dict] = {}
+        self.method = method
+
+    def add_member(self, name: str, predict_fn, weight: float = 1.0):
+        """Register a model member.
+
+        Args:
+            name:       Unique model identifier.
+            predict_fn: Callable(student_texts, ref_texts, hc_feats) → np.ndarray.
+            weight:     Relative weight for blending.
+        """
+        self.members[name] = {"predict_fn": predict_fn, "weight": weight}
+
+    def predict(self, student_texts: List[str], reference_texts: List[str],
+                hc_features: np.ndarray) -> Dict:
+        """Run all members and blend predictions.
+
+        Returns:
+            dict with 'score', 'confidence', 'per_model'.
+        """
+        preds_dict: Dict[str, np.ndarray] = {}
+        for name, m in self.members.items():
+            preds_dict[name] = m["predict_fn"](
+                student_texts, reference_texts, hc_features,
+            )
+
+        weights = {n: m["weight"] for n, m in self.members.items()}
+        total_w = sum(weights.values())
+        norm_w = {n: w / total_w for n, w in weights.items()}
+
+        if self.method == "weighted_average":
+            blended = sum(preds_dict[n] * norm_w[n] for n in preds_dict)
+        elif self.method == "median":
+            stacked = np.stack(list(preds_dict.values()), axis=0)
+            blended = np.median(stacked, axis=0)
+        else:
+            blended = sum(preds_dict[n] * norm_w[n] for n in preds_dict)
+
+        # Confidence = agreement among models
+        if len(preds_dict) > 1:
+            stacked = np.stack(list(preds_dict.values()), axis=0)
+            agreement = 1.0 - np.std(stacked, axis=0).mean()
+        else:
+            agreement = 0.8
+
+        return {
+            "score": np.clip(blended, 0, 1),
+            "confidence": float(np.clip(agreement, 0, 0.99)),
+            "per_model": {n: p.tolist() if hasattr(p, 'tolist') else p
+                         for n, p in preds_dict.items()},
+            "weights": norm_w,
+        }
