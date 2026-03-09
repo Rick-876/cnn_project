@@ -7,7 +7,7 @@ This project implements an **Automatic Short Answer Grading (ASAG)** system usin
 The system consists of:
 - **Backend**: FastAPI REST API that combines a TextCNN model with WordNet synonym matching, DistilBERT semantic similarity, content correctness checking, and grammar tolerance scoring
 - **Frontend**: React web interface with 20 sample questions spanning Computer Science, Biology, and Science domains
-- **Training Pipelines**: TextCNN pipeline, CPU-optimised DistilBERT+FC hybrid, and full transformer hybrid pipeline
+- **Training Pipeline**: TextCNN training with 5-epoch cross-validation and 80/20 split
 
 **Dataset**: [ASAG2024](https://huggingface.co/datasets/Meyerger/ASAG2024) — 15,190 graded short answers across 284 unique questions from university-level exams.
 
@@ -103,21 +103,11 @@ The system consists of:
 - **Character counter** — Live character count with 1,000-character limit and colour-coded bar
 - **Error handling** — Clear error banners when the backend is unreachable or returns an error
 
-### Training Pipelines
+### Training Pipeline
 
-- **TextCNN pipeline** (`asag_cnn_pipeline.py`) — Original 5-epoch training with vocab building and 80/20 split
-- **CPU-optimised hybrid** (`train_cpu.py`) — Frozen DistilBERT embeddings cached to disk, then a lightweight FC scoring head trains in ~18 minutes on CPU
-- **Full hybrid pipeline** (`hybrid_pipeline.py`) — End-to-end transformer + handcrafted features with CombinedLoss (MSE + QWK-proxy), best on GPU
-- **Hyperparameter tuning** (`hyperparameter_tuning.py`) — Optuna TPE search for CNN or hybrid configurations
+- **TextCNN pipeline** (`asag_cnn_pipeline.py`) — 5-epoch training with vocab building and 80/20 split
+- **Hyperparameter tuning** (`hyperparameter_tuning.py`) — Optuna TPE search for CNN configurations
 - **Score calibration** (`score_calibration.py`) — Platt, isotonic, and temperature scaling with Nelder-Mead-optimised rounding thresholds
-
-### Advanced Modules (v3.0+)
-
-- **Reasoning-guided training** — Dual-head model that generates explanations alongside scores, with knowledge distillation
-- **Hybrid semantic encoder** — Cross-attention between student and reference answer representations
-- **Length-adaptive processing** — Different processing strategies for short/medium/long answers
-- **Domain pre-training** — Masked language model fine-tuning on the ASAG corpus to adapt transformer weights
-- **Multi-model ensemble** — Weighted average, median, max-confidence, and voting strategies with calibrated confidence
 
 ### Evaluation & Analysis
 
@@ -130,32 +120,16 @@ The system consists of:
 
 ## Model Performance
 
-### Results (Random 80/20 Split)
+### TextCNN Results (Random 80/20 Split)
 
-| Metric | TextCNN (v1) | v3.0 CPU Hybrid | GPU Target |
-|--------|-------------|-----------------|------------|
-| **QWK** | 0.261 | **0.490** | > 0.65 |
-| **Accuracy** | 49.6% | **55.5%** | > 70% |
-| **MSE** | 0.140 | **0.175** | < 0.08 |
-| **F1 (weighted)** | 0.493 | **0.542** | > 0.70 |
-
-### CPU Hybrid Training (Per-Fold)
-
-| Fold | QWK | Accuracy | F1 | MSE |
-|------|-----|----------|----|-----|
-| 0 | 0.4952 | 0.5536 | 0.5414 | 0.1719 |
-| 1 | 0.4840 | 0.5521 | 0.5347 | 0.1795 |
-| 2 | 0.4906 | 0.5599 | 0.5501 | 0.1726 |
-
-**v1 → v3.0 CPU improvements:**
-- QWK: **+0.229** (0.261 → 0.490, +88% improvement)
-- Accuracy: **+5.9 pp** (49.6% → 55.5%)
-- F1: **+0.049** (0.493 → 0.542)
-
-### Key Findings
-- Class 1 (partial credit) has the lowest recall (11.7%) — improving middle-ground answer detection is the main path to higher accuracy
-- Short answers have worse metrics (QWK ~0.39) vs long answers (QWK ~0.43)
-- The frozen-encoder + FC head approach on CPU achieved 88% of the QWK improvement in just 18 minutes
+| Metric | Value |
+|--------|-------|
+| **QWK** | 0.261 |
+| **Accuracy** | 49.6% |
+| **MSE** | 0.140 |
+| **F1 (weighted)** | 0.493 |
+| **Test Samples** | 3,038 |
+| **Training Time** | ~5 min |
 
 ---
 
@@ -190,16 +164,9 @@ cnn_project/
 │
 ├── feature_engineering.py       # 27 handcrafted features (lexical, syntactic, semantic)
 ├── training_utils.py            # CombinedLoss, CosineScheduler, training helpers
-├── hybrid_pipeline.py           # Full hybrid transformer + HC features pipeline
-├── train_cpu.py                 # CPU-optimised DistilBERT+FC training (~18 min)
 ├── score_calibration.py         # Platt/Isotonic/Temperature scaling + ScoreRounder
 ├── hyperparameter_tuning.py     # Optuna TPE hyperparameter search
 ├── error_analysis.py            # Error analysis + A/B testing framework
-│
-├── reasoning_guided_training.py # Dual-head score + explanation model
-├── hybrid_semantic_encoder.py   # Cross-attention semantic encoder
-├── length_adaptive_processor.py # Length-aware answer processing
-├── domain_pretraining.py        # MLM domain pre-training for transformers
 │
 ├── test_model.py                # Standard model evaluation (random 80/20 split)
 ├── cross_question_test.py       # Cross-question generalisation evaluation
@@ -208,13 +175,6 @@ cnn_project/
 ├── asag2024_all.csv             # Full ASAG2024 dataset (15,190 rows)
 ├── textcnn_model.pth            # Trained TextCNN model weights
 ├── test_set.csv                 # Exported test set (3,038 rows)
-│
-├── hybrid_models/               # CPU training outputs
-│   ├── embeddings_cache.npy     # Cached DistilBERT embeddings
-│   ├── scoring_head_fold*.pth   # Per-fold FC head weights
-│   ├── rounder_fold*.npy        # Per-fold optimised rounding thresholds
-│   ├── cpu_training_summary.json
-│   └── error_report.json
 │
 ├── tests/
 │   └── test_modules.py          # 44 integration tests
@@ -354,7 +314,7 @@ cd c:\Users\user\Documents\cnn_project
 
 ## Training
 
-### Option A: TextCNN (Original, ~5 min)
+### Train the TextCNN Model (~5 min)
 
 ```bash
 .venv\Scripts\python asag_cnn_pipeline.py
@@ -362,62 +322,14 @@ cd c:\Users\user\Documents\cnn_project
 
 Trains for 5 epochs, saves weights to `textcnn_model.pth` and writes `test_set.csv`.
 
-### Option B: CPU-Optimised Hybrid (~18 min, recommended)
-
-Pre-computes DistilBERT embeddings once, then trains a lightweight FC scoring head:
-
-```bash
-# Default: 3-fold CV, 20 epochs (embeddings cached for reuse)
-.venv\Scripts\python train_cpu.py --folds 3 --epochs 20
-
-# Re-run with different hyperparameters (~1 min, uses cached embeddings)
-.venv\Scripts\python train_cpu.py --folds 5 --epochs 30 --lr 5e-4
-```
-
-**Output:**
-- `hybrid_models/embeddings_cache.npy` — cached DistilBERT embeddings (reusable)
-- `hybrid_models/scoring_head_fold*.pth` — per-fold FC head weights
-- `hybrid_models/rounder_fold*.npy` — per-fold optimised rounding thresholds
-- `hybrid_models/cpu_training_summary.json` — full CV metrics
-- `hybrid_models/error_report.json` — detailed error analysis
-
-### Option C: Full Hybrid Pipeline (GPU recommended)
-
-```bash
-# Default: DeBERTa-v3-small, 5-fold CV, 8 epochs
-.venv\Scripts\python hybrid_pipeline.py
-
-# Faster experiment with RoBERTa and 3 folds
-.venv\Scripts\python hybrid_pipeline.py --model roberta --folds 3 --epochs 5
-
-# CPU test (DistilBERT, 2 folds, 2 epochs) — ~8 hours on CPU
-.venv\Scripts\python hybrid_pipeline.py --model distilbert --folds 2 --epochs 2 --max_len 128
-```
-
 ### Hyperparameter Tuning (Optional)
 
 ```bash
 # Tune the CNN pipeline (30 trials ≈ 20 min)
 .venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 30
 
-# Tune the hybrid transformer (GPU recommended, 10 trials ≈ 2–4 h)
-.venv\Scripts\python hyperparameter_tuning.py --target hybrid --trials 10
-
 # Resume a study using a persistent SQLite database
 .venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 50 --storage optuna_cnn.db
-```
-
-### Domain Pre-training (GPU only)
-
-```bash
-.venv\Scripts\python domain_pretraining.py --model deberta --epochs 3
-```
-
-### Reasoning-Guided Training (GPU only)
-
-```bash
-.venv\Scripts\python reasoning_guided_training.py --stage full
-.venv\Scripts\python reasoning_guided_training.py --stage distill  # knowledge distillation
 ```
 
 ---
@@ -520,7 +432,7 @@ Off-topic answers return confidence = **0.97** (very confident they're wrong).
 
 ## Model Architecture
 
-### TextCNN (Inference Model)
+### TextCNN
 
 | Layer | Details |
 |-------|---------|
@@ -656,17 +568,16 @@ Run the full integration test suite:
 
 ## Performance Summary
 
-| Metric | TextCNN (v1) | v3.0 CPU Hybrid | GPU Target |
-|--------|-------------|-----------------|------------|
-| QWK | 0.261 | **0.490** | > 0.65 |
-| Accuracy | 49.6% | **55.5%** | > 70% |
-| MSE | 0.140 | **0.175** | < 0.08 |
-| F1-score | 0.493 | **0.542** | > 0.70 |
-| Training time | ~5 min | **18.5 min (CPU)** | ~2h (GPU) |
-| Off-topic detection | None | Yes (3-signal) | Yes |
-| Synonym matching | None | WordNet + DistilBERT | WordNet + DistilBERT |
-| Feature input | Token embeddings | + 27 HC + sim score | + 39 features |
-| Explainability | None | ErrorAnalyser | + SHAP + heatmaps |
+| Metric | TextCNN |
+|--------|--------|
+| QWK | 0.261 |
+| Accuracy | 49.6% |
+| MSE | 0.140 |
+| F1-score | 0.493 |
+| Training time | ~5 min |
+| Off-topic detection | Yes (3-signal) |
+| Synonym matching | WordNet + DistilBERT |
+| Feature input | 300-dim embeddings + 1 sim + 27 HC |
 
 ---
 
