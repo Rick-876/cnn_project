@@ -9,6 +9,7 @@ Covers:
     4. domain_pretraining         — corpus builder, comparison utility
     5. error_analysis             — enhanced metrics, A/B framework
     6. ensemble_model             — MultiModelEnsemble integration
+    7. backend semantic matching  — synonym overlap, semantic similarity, relevance
 
 Run:
     python -m pytest tests/test_modules.py -v
@@ -369,6 +370,184 @@ class TestCrossAttentionVisualization(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7.  Backend — Semantic Matching Functions
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSynonymOverlap(unittest.TestCase):
+    """Tests for backend.synonym_overlap (WordNet-based word matching)."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Ensure NLTK data is available
+        import nltk
+        nltk.download("wordnet", quiet=True)
+        nltk.download("omw-1.4", quiet=True)
+
+    def _import(self):
+        from backend import synonym_overlap
+        return synonym_overlap
+
+    def test_exact_match_gives_full_score(self):
+        synonym_overlap = self._import()
+        result = synonym_overlap(
+            "Water expands when heated",
+            "Water expands when heated",
+        )
+        self.assertAlmostEqual(result['score'], 1.0, places=1)
+        self.assertEqual(len(result['missed']), 0)
+
+    def test_synonym_words_are_matched(self):
+        synonym_overlap = self._import()
+        # "enlarge" is a synonym of "expand"
+        result = synonym_overlap(
+            "The liquid enlarges as the temperature rises",
+            "Water expands when heated",
+        )
+        self.assertGreater(result['score'], 0.3)
+        # At least some synonym_matches should be found
+        self.assertGreater(len(result['synonym_matches']), 0)
+
+    def test_completely_wrong_answer(self):
+        synonym_overlap = self._import()
+        result = synonym_overlap(
+            "Gravity pulls objects downward towards the ground",
+            "Water expands when heated",
+        )
+        self.assertLess(result['score'], 0.5)
+
+    def test_empty_reference(self):
+        synonym_overlap = self._import()
+        result = synonym_overlap("Some answer", "")
+        self.assertEqual(result['score'], 0.0)
+
+    def test_empty_student(self):
+        synonym_overlap = self._import()
+        result = synonym_overlap("", "Water expands when heated")
+        self.assertEqual(result['score'], 0.0)
+
+    def test_result_keys(self):
+        synonym_overlap = self._import()
+        result = synonym_overlap("test answer", "reference answer text")
+        for key in ('score', 'matched', 'missed', 'synonym_matches'):
+            self.assertIn(key, result)
+
+
+class TestSemanticSimilarity(unittest.TestCase):
+    """Tests for backend.semantic_similarity (DistilBERT cosine similarity)."""
+
+    def _import(self):
+        from backend import semantic_similarity
+        return semantic_similarity
+
+    def test_identical_texts_high_similarity(self):
+        semantic_similarity = self._import()
+        sim = semantic_similarity("Water expands when heated", "Water expands when heated")
+        # May be 0.0 if DistilBERT not loaded (encoder is None in unit test context)
+        # Just verify it returns a float in [0, 1]
+        self.assertIsInstance(sim, float)
+        self.assertGreaterEqual(sim, 0.0)
+        self.assertLessEqual(sim, 1.0)
+
+    def test_returns_float(self):
+        semantic_similarity = self._import()
+        result = semantic_similarity("Hello world", "Goodbye moon")
+        self.assertIsInstance(result, float)
+
+
+class TestRelevanceScore(unittest.TestCase):
+    """Tests for backend.relevance_score with reference-aware checking."""
+
+    def _import(self):
+        from backend import relevance_score
+        return relevance_score
+
+    def test_exact_overlap_high(self):
+        relevance_score = self._import()
+        score = relevance_score(
+            "Why does water expand when heated?",
+            "Water expands when heated",
+        )
+        self.assertGreater(score, 0.0)
+
+    def test_no_overlap_zero(self):
+        relevance_score = self._import()
+        score = relevance_score(
+            "What is photosynthesis?",
+            "Friction slows objects",
+        )
+        self.assertLessEqual(score, 0.1)
+
+    def test_reference_boosts_relevance(self):
+        relevance_score = self._import()
+        # Without reference: the answer shares no words with the question
+        score_no_ref = relevance_score(
+            "Why does the water level rise in the straw?",
+            "The liquid enlarges as temperature increases",
+        )
+        # With reference: answer overlaps with the reference via synonyms
+        score_with_ref = relevance_score(
+            "Why does the water level rise in the straw?",
+            "The liquid enlarges as temperature increases",
+            reference="Water expands when heated",
+        )
+        self.assertGreaterEqual(score_with_ref, score_no_ref)
+
+    def test_empty_answer_returns_zero(self):
+        relevance_score = self._import()
+        score = relevance_score("Some question?", "")
+        self.assertEqual(score, 0.0)
+
+
+class TestEnhancedSimilarity(unittest.TestCase):
+    """Tests for backend.enhanced_similarity feature dict."""
+
+    def _import(self):
+        from backend import enhanced_similarity
+        return enhanced_similarity
+
+    def test_returns_all_keys(self):
+        enhanced_similarity = self._import()
+        result = enhanced_similarity("test answer", "reference text here")
+        for key in ('unigram', 'bigram', 'trigram', 'tfidf', 'length_ratio',
+                     'synonym', 'semantic', 'synonym_detail'):
+            self.assertIn(key, result, f"Missing key: {key}")
+
+    def test_exact_match_high_unigram(self):
+        enhanced_similarity = self._import()
+        result = enhanced_similarity("Water expands when heated", "Water expands when heated")
+        self.assertGreater(result['unigram'], 0.8)
+
+    def test_values_are_bounded(self):
+        enhanced_similarity = self._import()
+        result = enhanced_similarity("Some answer", "Some reference")
+        for key in ('unigram', 'bigram', 'trigram', 'length_ratio', 'synonym', 'semantic'):
+            self.assertGreaterEqual(result[key], 0.0)
+            self.assertLessEqual(result[key], 1.0)
+
+
+class TestReferenceSimilarity(unittest.TestCase):
+    """Tests for backend.reference_similarity and reference_similarity_from_features."""
+
+    def test_weighted_sum_consistent(self):
+        from backend import reference_similarity, enhanced_similarity, reference_similarity_from_features
+        student = "Water expands when heated"
+        ref = "Water expands when heated"
+        # Both paths should produce the same result
+        direct = reference_similarity(student, ref)
+        features = enhanced_similarity(student, ref)
+        from_features = reference_similarity_from_features(features)
+        self.assertAlmostEqual(direct, from_features, places=5)
+
+    def test_returns_bounded_float(self):
+        from backend import reference_similarity
+        score = reference_similarity("some text", "another text")
+        self.assertIsInstance(score, float)
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 1.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

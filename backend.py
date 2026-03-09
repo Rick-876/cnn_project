@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 import asyncio
+from contextlib import asynccontextmanager
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import Counter
@@ -22,8 +23,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from nltk.corpus import wordnet
+from nltk.stem import WordNetLemmatizer
+from transformers import AutoTokenizer, DistilBertForMaskedLM
 from content_correctness import ContentCorrectnessChecker
 from grammar_detection import GrammarDetector
+from feature_engineering import extract_all_features
 
 # ── Config (must match training) ───────────────────────────────────────────────
 FULL_DATA    = os.path.join(os.path.dirname(__file__), "asag2024_all.csv")
@@ -52,6 +57,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 REF_LOOKUP = {}
 QUESTION_LIST = []  # List of all questions for fuzzy matching
 tfidf_vectorizer = None
+
+# Semantic similarity encoder (loaded at startup)
+semantic_tokenizer = None
+semantic_encoder = None
+lemmatizer = WordNetLemmatizer()
 
 # Content correctness and grammar detection
 content_checker = None
@@ -82,6 +92,125 @@ def compute_ngram_overlap(student: str, reference: str, n: int) -> float:
     return len(s_ngrams & r_ngrams) / len(r_ngrams)
 
 
+def _get_synonyms(word: str) -> set:
+    """Get all synonyms for a word from WordNet."""
+    synonyms = set()
+    for syn in wordnet.synsets(word):
+        for lemma in syn.lemmas():
+            name = lemma.name().lower().replace('_', ' ')
+            if name != word and ' ' not in name:  # skip multi-word synonyms
+                synonyms.add(name)
+    return synonyms
+
+
+def _get_related_words(word: str) -> set:
+    """Get synonyms + hypernyms + hyponyms for richer matching."""
+    related = _get_synonyms(word)
+    for syn in wordnet.synsets(word)[:3]:  # limit to top 3 senses
+        # Hypernyms (more general: "dog" → "animal")
+        for hyper in syn.hypernyms():
+            for lemma in hyper.lemmas():
+                name = lemma.name().lower().replace('_', ' ')
+                if ' ' not in name:
+                    related.add(name)
+        # Hyponyms (more specific: "animal" → "dog")
+        for hypo in syn.hyponyms()[:5]:
+            for lemma in hypo.lemmas():
+                name = lemma.name().lower().replace('_', ' ')
+                if ' ' not in name:
+                    related.add(name)
+    related.discard(word)
+    return related
+
+
+def synonym_overlap(student: str, reference: str) -> dict:
+    """Compute semantic word overlap using WordNet synonyms.
+
+    For each content word in the reference, checks if the student answer
+    contains either the exact word or any of its synonyms/related words.
+    Returns both the overlap score and which concepts were matched.
+    """
+    s_tokens = [w for w in tokenize(student) if w not in STOPWORDS and len(w) > 2]
+    r_tokens = [w for w in tokenize(reference) if w not in STOPWORDS and len(w) > 2]
+
+    if not r_tokens:
+        return {'score': 0.0, 'matched': [], 'missed': [], 'synonym_matches': []}
+
+    # Lemmatize for better matching ("produces" → "produce", "cells" → "cell")
+    s_lemmas = {lemmatizer.lemmatize(w) for w in s_tokens}
+    s_set = set(s_tokens) | s_lemmas
+
+    # Expand student words with their synonyms for matching
+    s_expanded = set(s_set)
+    for w in s_tokens:
+        s_expanded |= _get_synonyms(w)
+        s_expanded.add(lemmatizer.lemmatize(w))
+
+    matched = []
+    missed = []
+    synonym_matches = []  # track which words were matched via synonym
+
+    for ref_word in set(r_tokens):
+        ref_lemma = lemmatizer.lemmatize(ref_word)
+
+        # Direct match (exact or lemma)
+        if ref_word in s_set or ref_lemma in s_set:
+            matched.append(ref_word)
+            continue
+
+        # Synonym match: check if any student word is a synonym of the ref word
+        ref_synonyms = _get_related_words(ref_word) | _get_related_words(ref_lemma)
+        if ref_synonyms & s_expanded:
+            matched.append(ref_word)
+            match_via = ref_synonyms & s_expanded
+            synonym_matches.append({
+                'reference_word': ref_word,
+                'matched_by': list(match_via)[:3]
+            })
+            continue
+
+        missed.append(ref_word)
+
+    unique_ref = set(r_tokens)
+    score = len(matched) / len(unique_ref) if unique_ref else 0.0
+
+    return {
+        'score': score,
+        'matched': matched,
+        'missed': missed,
+        'synonym_matches': synonym_matches
+    }
+
+
+@torch.no_grad()
+def semantic_similarity(student: str, reference: str) -> float:
+    """Compute sentence-level semantic similarity using DistilBERT.
+
+    Encodes both texts with DistilBERT, mean-pools the token embeddings,
+    and returns cosine similarity. This captures meaning even when
+    different words are used (e.g. 'produces energy' vs 'generates power').
+    """
+    if semantic_tokenizer is None or semantic_encoder is None:
+        return 0.0
+
+    try:
+        enc = semantic_tokenizer(
+            [student, reference],
+            truncation=True, padding=True, max_length=128,
+            return_tensors='pt',
+        )
+        out = semantic_encoder(**enc)
+        # Mean pool over tokens (excluding padding)
+        mask = enc['attention_mask'].unsqueeze(-1).float()  # [2, L, 1]
+        pooled = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1)  # [2, H]
+        # Cosine similarity
+        sim = F.cosine_similarity(pooled[0:1], pooled[1:2]).item()
+        return max(0.0, sim)  # clamp negatives
+    except Exception as e:
+        print(f"Semantic similarity error: {e}")
+        return 0.0
+
+
 def enhanced_similarity(student: str, reference: str) -> dict:
     """Compute multiple similarity features between student answer and reference."""
     # 1. Unigram overlap (original simple method)
@@ -106,31 +235,49 @@ def enhanced_similarity(student: str, reference: str) -> dict:
     
     # 5. Length ratio (penalize very short answers)
     length_ratio = min(len(s_words) / max(len(r_words), 1), 1.0)
-    
+
+    # 6. Synonym overlap (WordNet) — matches words with similar meanings
+    syn_result = synonym_overlap(student, reference)
+    synonym_score = syn_result['score']
+
+    # 7. Sentence-level semantic similarity (DistilBERT)
+    sem_sim = semantic_similarity(student, reference)
+
     return {
         'unigram': unigram_overlap,
         'bigram': bigram_overlap,
         'trigram': trigram_overlap,
         'tfidf': tfidf_sim,
-        'length_ratio': length_ratio
+        'length_ratio': length_ratio,
+        'synonym': synonym_score,
+        'semantic': sem_sim,
+        'synonym_detail': syn_result,
     }
+
+
+# Weights used by reference_similarity (shared constant)
+_SIM_WEIGHTS = {
+    'unigram': 0.10,
+    'bigram': 0.15,
+    'trigram': 0.10,
+    'tfidf': 0.15,
+    'length_ratio': 0.05,
+    'synonym': 0.20,
+    'semantic': 0.25,
+}
+
+
+def reference_similarity_from_features(features: dict) -> float:
+    """Compute weighted combination from pre-computed similarity features.
+
+    Avoids re-calling enhanced_similarity() when the dict is already available.
+    """
+    return sum(features.get(k, 0) * w for k, w in _SIM_WEIGHTS.items())
 
 
 def reference_similarity(student: str, reference: str) -> float:
-    """Compute weighted combination of similarity features."""
-    features = enhanced_similarity(student, reference)
-    
-    # Weighted combination emphasizing content overlap
-    weights = {
-        'unigram': 0.25,
-        'bigram': 0.30,
-        'trigram': 0.20,
-        'tfidf': 0.25,
-        'length_ratio': 0.05
-    }
-    
-    weighted_sim = sum(features[k] * weights[k] for k in weights.keys())
-    return weighted_sim
+    """Convenience wrapper: compute features then combine."""
+    return reference_similarity_from_features(enhanced_similarity(student, reference))
 
 
 def find_closest_question(query: str) -> str:
@@ -153,32 +300,27 @@ def find_closest_question(query: str) -> str:
     
     # Only return match if overlap is significant
     return best_match if best_score > 0.4 else ""
-    q_words = {w for w in tokenize(question) if w not in STOPWORDS and len(w) > 2}
-    a_words = {w for w in tokenize(answer)   if w not in STOPWORDS and len(w) > 2}
-    if not q_words or not a_words:
-        return 0.0
-    return len(q_words & a_words) / len(q_words | a_words)
 
 
 # ── Model definition (must match training) ───────────────────────────────────
 class TextCNN(nn.Module):
     def __init__(self, vocab_size, embed_dim=EMBED_DIM, num_filters=NUM_FILTERS,
-                 filter_sizes=FILTER_SIZES, output_dim=1, dropout=0.5):
+                 filter_sizes=FILTER_SIZES, num_hc=27, output_dim=1, dropout=0.4):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.convs = nn.ModuleList([
             nn.Conv2d(1, num_filters, (fs, embed_dim)) for fs in filter_sizes
         ])
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1, output_dim)
+        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1 + num_hc, output_dim)
 
-    def forward(self, x, sim):
+    def forward(self, x, sim, hc):
         x = self.embedding(x).unsqueeze(1)
         convs = [F.relu(c(x)).squeeze(3) for c in self.convs]
         pooled = [F.max_pool1d(c, c.size(2)).squeeze(2) for c in convs]
         cat = torch.cat(pooled, 1)
-        cat = torch.cat([cat, sim.unsqueeze(1)], dim=1)
-        return self.fc(self.dropout(cat)).squeeze(1)
+        cat = torch.cat([cat, sim.unsqueeze(1), hc], dim=1)
+        return torch.sigmoid(self.fc(self.dropout(cat))).squeeze(1)
 
 
 # ── Initialization (runs at app startup) ──────────────────────────────────────
@@ -188,12 +330,37 @@ def encode_text(text: str):
     return ids
 
 
-def relevance_score(question: str, answer: str) -> float:
+def relevance_score(question: str, answer: str, reference: str = "") -> float:
+    """Check if the answer is on-topic.
+
+    Uses three signals so synonym-rich answers aren't penalised:
+      1. Exact-word overlap with the question (original method)
+      2. Exact-word overlap with the reference answer
+      3. WordNet-expanded overlap with the reference answer
+    Returns the *maximum* of these three, so a single 'hit' is enough.
+    """
     q_words = {w for w in tokenize(question) if w not in STOPWORDS and len(w) > 2}
     a_words = {w for w in tokenize(answer)   if w not in STOPWORDS and len(w) > 2}
     if not q_words or not a_words:
         return 0.0
-    return len(q_words & a_words) / len(q_words | a_words)
+
+    # Signal 1: question ↔ answer word overlap (original)
+    question_overlap = len(q_words & a_words) / len(q_words | a_words)
+
+    # Signal 2: reference ↔ answer word overlap
+    ref_overlap = 0.0
+    if reference:
+        r_words = {w for w in tokenize(reference) if w not in STOPWORDS and len(w) > 2}
+        if r_words:
+            ref_overlap = len(r_words & a_words) / len(r_words | a_words)
+
+    # Signal 3: synonym-expanded overlap with reference
+    syn_overlap = 0.0
+    if reference:
+        syn_result = synonym_overlap(answer, reference)
+        syn_overlap = syn_result['score']
+
+    return max(question_overlap, ref_overlap, syn_overlap * 0.5)
 
 
 
@@ -232,6 +399,23 @@ def initialize_backend():
     tfidf_vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
     tfidf_vectorizer.fit(all_texts)
     print("TF-IDF vectorizer ready")
+
+    # Load DistilBERT for semantic similarity
+    global semantic_tokenizer, semantic_encoder
+    print("Loading semantic encoder (DistilBERT) …")
+    try:
+        semantic_tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
+        # Load with the full MLM class (matches the checkpoint exactly),
+        # then keep only the base transformer — avoids UNEXPECTED-key warnings.
+        _mlm = DistilBertForMaskedLM.from_pretrained('distilbert-base-uncased')
+        semantic_encoder = _mlm.distilbert
+        del _mlm
+        semantic_encoder.eval()
+        print("  ✓ Semantic encoder ready")
+    except Exception as e:
+        print(f"  ✗ Semantic encoder failed: {e}")
+        semantic_tokenizer = None
+        semantic_encoder = None
 
     # Initialize model and try to load weights
     m = TextCNN(vocab_size=vocab_size).to(device)
@@ -296,7 +480,16 @@ def get_feedback(score_norm: float, question: str, off_topic: bool = False) -> s
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI(title="ASAG CNN Backend", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Run heavy initialisation in a thread so the event-loop stays responsive."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, initialize_backend)
+    yield  # app is running
+
+
+app = FastAPI(title="ASAG CNN Backend", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -318,12 +511,6 @@ class PredictResponse(BaseModel):
     reference_answer: str
 
 
-@app.on_event("startup")
-async def startup_event():
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, initialize_backend)
-
-
 @app.get("/")
 def root():
     return {"status": "ASAG backend running", "endpoint": "POST /predict"}
@@ -331,15 +518,25 @@ def root():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    # Look up reference with fuzzy matching  fallback
+    # Look up reference with fuzzy matching fallback
     question_key = find_closest_question(req.question.strip())
     reference = REF_LOOKUP.get(question_key, "")
-    
+
     # If no reference found, warn but continue with empty reference
     if not reference:
         print(f"Warning: No reference found for question: {req.question[:100]}...")
         reference = ""
 
+    # ── Relevance guard (cheap check BEFORE expensive features) ────────────
+    rel = relevance_score(req.question, req.answer, reference)
+    if rel < RELEVANCE_THRESHOLD:
+        return PredictResponse(
+            score=0.0, confidence=0.97,
+            feedback=get_feedback(0.0, req.question, off_topic=True),
+            reference_answer=reference,
+        )
+
+    # ── Encode input for TextCNN ───────────────────────────────────────────
     combined = (
         f"Question: {req.question} "
         f"Reference: {reference} "
@@ -347,18 +544,17 @@ def predict(req: PredictRequest):
     )
     input_ids = torch.tensor([encode_text(combined)], dtype=torch.long).to(device)
 
-    # Compute enhanced similarity features
+    # Compute enhanced similarity features (computed once, reused below)
     sim_features = enhanced_similarity(req.answer, reference)
-    sim_score = reference_similarity(req.answer, reference)
+    sim_score = reference_similarity_from_features(sim_features)
     sim_tensor = torch.tensor([sim_score], dtype=torch.float).to(device)
 
-    # Relevance guard
-    rel = relevance_score(req.question, req.answer)
-    if rel < RELEVANCE_THRESHOLD:
-        return PredictResponse(score=0.0, confidence=0.97, feedback=get_feedback(0.0, req.question, off_topic=True))
+    # Compute handcrafted features (27-dim) to match training architecture
+    hc_feats = extract_all_features(req.answer, reference)
+    hc_tensor = torch.tensor([hc_feats], dtype=torch.float).to(device)
 
     with torch.no_grad():
-        model_prediction = model(input_ids, sim_tensor)
+        model_prediction = model(input_ids, sim_tensor, hc_tensor)
 
     model_score = float(torch.clamp(model_prediction, 0.0, 1.0).item())
     
@@ -410,13 +606,25 @@ def predict(req: PredictRequest):
     model_weight = 0.35
     
     # Use the average of top similarity features as direct evidence
+    # Now includes semantic and synonym scores for meaning-level matching
     top_features = [
         sim_features['tfidf'],
         sim_features['bigram'],
-        sim_features['unigram']
+        sim_features['unigram'],
+        sim_features.get('synonym', 0.0),
+        sim_features.get('semantic', 0.0),
     ]
     valid_features = [f for f in top_features if f > 0 and not np.isnan(f)]
     avg_similarity = np.mean(valid_features) if valid_features else 0.0
+
+    # Log synonym matches for transparency
+    syn_detail = sim_features.get('synonym_detail', {})
+    if syn_detail.get('synonym_matches'):
+        matches_str = "; ".join(
+            f"{m['reference_word']} ← {', '.join(m['matched_by'])}"
+            for m in syn_detail['synonym_matches']
+        )
+        print(f"Synonym matches: {matches_str}")
     
     # Ensure no NaN values
     if np.isnan(model_score):
