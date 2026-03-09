@@ -1,143 +1,172 @@
-# Automatic Short Answer Grading System (ASAG) Using CNN
+# Automatic Short Answer Grading (ASAG) using CNN
 
 ## Overview
 
-This project implements a complete end-to-end pipeline for **Automatic Short Answer Grading (ASAG)** using the [ASAG2024 dataset](https://huggingface.co/datasets/Meyerger/ASAG2024). It trains a **TextCNN** model to predict normalised grades for student answers and exposes a **FastAPI backend** consumed by a **React web frontend** — enabling live, interactive grading through a browser.
+This project implements an **Automatic Short Answer Grading (ASAG)** system using a **Text Convolutional Neural Network (TextCNN)** enhanced with semantic similarity features. It takes a student's short answer and a question, compares the answer against a reference answer using multiple NLP techniques, and predicts a normalised grade (0.0–1.0).
+
+The system consists of:
+- **Backend**: FastAPI REST API that combines a TextCNN model with WordNet synonym matching, DistilBERT semantic similarity, content correctness checking, and grammar tolerance scoring
+- **Frontend**: React web interface with 20 sample questions spanning Computer Science, Biology, and Science domains
+- **Training Pipelines**: TextCNN pipeline, CPU-optimised DistilBERT+FC hybrid, and full transformer hybrid pipeline
+
+**Dataset**: [ASAG2024](https://huggingface.co/datasets/Meyerger/ASAG2024) — 15,190 graded short answers across 284 unique questions from university-level exams.
 
 ---
 
 ## Architecture
 
 ```
-asag2024_all.csv
-      │
-      ▼
-asag_cnn_pipeline.py   ←─── Train TextCNN model
-      │ saves
-      ▼
-textcnn_model.pth
-      │ loaded by
-      ├──► test_model.py            (random 80/20 split evaluation)
-      ├──► cross_question_test.py   (cross-question generalisation test)
-      └──► backend.py               (FastAPI REST API — POST /predict)
-                │
-                ▼
-        frontend/  (React SPA)
-        http://localhost:3000
+┌──────────────────────────────┐
+│   React Frontend (:3000)     │   User selects question,
+│   20 sample questions        │   types answer, submits
+│   Score + confidence display │──────────────────┐
+│   Reference answer display   │                  │
+│   Score distribution chart   │                  │
+└──────────────────────────────┘                  │
+         ▲                                        ▼
+         │                              POST /predict
+         │                    ┌──────────────────────────────┐
+         │  JSON response     │   FastAPI Backend (:8000)    │
+         │  {score,           │                              │
+         │   confidence,      │  ┌────────────────────────┐  │
+         │   feedback,        │  │ Relevance Guard        │  │
+         │   reference}       │  │ 3 signals: question,   │  │
+         │                    │  │ reference, synonym     │  │
+         └────────────────────│  └──────────┬─────────────┘  │
+                              │             │ on-topic?      │
+                              │             ▼                │
+                              │  ┌────────────────────────┐  │
+                              │  │ TextCNN Model          │  │
+                              │  │ 512 conv + 1 sim +     │  │
+                              │  │ 27 handcrafted feats   │  │
+                              │  └──────────┬─────────────┘  │
+                              │             │                │
+                              │             ▼                │
+                              │  ┌────────────────────────┐  │
+                              │  │ Semantic Similarity     │  │
+                              │  │ • WordNet synonyms      │  │
+                              │  │ • DistilBERT cosine     │  │
+                              │  │ • TF-IDF + n-grams      │  │
+                              │  └──────────┬─────────────┘  │
+                              │             │                │
+                              │             ▼                │
+                              │  ┌────────────────────────┐  │
+                              │  │ Content & Grammar      │  │
+                              │  │ • Keyword checking     │  │
+                              │  │ • Word-order analysis   │  │
+                              │  │ • Grammar tolerance     │  │
+                              │  └──────────┬─────────────┘  │
+                              │             │                │
+                              │             ▼                │
+                              │  ┌────────────────────────┐  │
+                              │  │ Adaptive Score Blend   │  │
+                              │  │ model(35%) + sim(65%)  │  │
+                              │  │ → round to 0, 0.5, 1  │  │
+                              │  └────────────────────────┘  │
+                              └──────────────────────────────┘
+                                          │
+                                          ▼
+                              ┌──────────────────────────────┐
+                              │   ASAG2024 Dataset           │
+                              │   15,190 answers             │
+                              │   284 questions              │
+                              │   Reference answer lookup    │
+                              └──────────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-### Original Pipeline
-- **TextCNN Model** — 4 parallel conv filters (sizes 2, 3, 4, 5), 128 feature maps, 300-dim embeddings, max-over-time pooling
-- **80/20 Train/Test Split** — reproducible with `random_state=42`
-- **Persistent Test Set** — `test_set.csv` saved for offline analysis
-- **Standard Evaluation** — MSE, QWK, Accuracy, Precision, Recall, F1, Confusion Matrix
-- **Cross-Question Testing** — held-out questions unseen during training; per-question F1 breakdown
-- **FastAPI Backend** — CORS-enabled REST API serving live predictions at `http://localhost:8000/predict`
-- **React Frontend** — academic-style single-page grading interface with score visualisation and model insights
+### Scoring Engine (Backend)
 
-### Enhanced Features (v2.0)
-- **DistilBERT Training Pipeline** — Stratified 5-Fold cross-validation, class-weighted loss, early stopping
-- **Advanced Preprocessing** — Lemmatization, stemming, extended stopword removal, text normalization
-- **Ensemble Predictions** — Weighted averaging of multiple model predictions, adaptive weighting based on model agreement
-- **Question-Specific Models** — Lightweight Ridge regression models trained per-question for targeted accuracy
-- **Reference Answer Database** — Semantic similarity scoring with BERTScore and n-gram overlap
-- **Calibrated Confidence** — Platt scaling-based confidence calibration, adaptive blending based on model agreement
-- **Topical Relevance Gate** — Jaccard similarity-based filtering to catch off-topic responses
-- **Improved Scoring System** — Multi-source adaptive blending (CNN, similarity features, ensemble, question models)
-- **Content Correctness Check** — Keyword presence with WordNet synonyms, concept coverage, word order analysis
-- **Grammar Tolerance Detection** — POS-based grammar assessment, tolerance scoring for non-native speakers
-- **Word Order Analysis** — LCS-based detection of scrambled-but-correct answers, content override scoring
+- **TextCNN model** — 4-kernel CNN (sizes 2–5, 128 filters each) trained on ASAG2024 with 300-dim embeddings
+- **27 handcrafted features** — Lexical, syntactic, and semantic features extracted per answer (length, n-gram overlap, POS ratios, keyword density, etc.)
+- **WordNet synonym matching** — Expands vocabulary using synonyms, hypernyms, and hyponyms so answers with alternative phrasing are matched correctly
+- **DistilBERT semantic similarity** — Sentence-level cosine similarity via mean-pooled DistilBERT embeddings to capture meaning beyond exact words
+- **TF-IDF similarity** — Weighted term overlap using a vectorizer fit on the full corpus
+- **N-gram overlap** — Unigram, bigram, and trigram overlap with reference answers
+- **Content correctness checking** — Verifies key concepts from the reference appear in the student answer, with WordNet synonym tolerance
+- **Word-order analysis** — Detects scrambled-but-correct answers (content present, structure broken) and applies content override scoring
+- **Grammar tolerance** — POS-based grammar assessment that avoids harsh penalties for ESL students or non-native speakers
+- **Relevance gate** — 3-signal relevance check (question overlap, reference overlap, synonym-expanded overlap) to reject off-topic answers before expensive computation
+- **Adaptive score blending** — Model prediction (35%) + similarity features (65%) with adaptive weights based on agreement between signals
+- **Reference answer display** — Returns the best reference answer alongside the score for student learning
+- **Modern FastAPI patterns** — Lifespan context manager for startup, async-safe initialisation, CORS middleware
 
-### Improved Features (v3.0)
-- **Hybrid Transformer Model** — DeBERTa/RoBERTa backbone fused with 27-dim handcrafted feature vector via shared FC head
-- **Feature Engineering Module** — Readability metrics (Flesch, Gunning Fog), lexical diversity, POS density, structural features, n-gram similarity
-- **QWK-Optimised Training** — `CombinedLoss` blends Huber regression loss + differentiable QWK loss; directly optimises grading agreement
-- **Score Rounding Optimisation** — Nelder-Mead threshold tuning post-inference to maximise QWK (typically +0.10–0.15 QWK improvement)
-- **Platt / Isotonic Calibration** — `EnsembleCalibrator` auto-selects the best post-hoc calibration method on validation data
-- **Optuna Hyperparameter Tuning** — TPE sampler with median pruner for both CNN and hybrid pipelines
-- **Error Analysis Module** — Per-class breakdown, bias detection, feature–error correlations, SHAP summaries, worst-prediction inspection
-- **Gradient Clipping & Weight Decay** — Prevents exploding gradients and overfitting in both pipelines
+### Frontend (React)
 
-### Advanced Features (v3.0+)
-- **CPU-Optimised Training** — Pre-compute DistilBERT embeddings once, then train lightweight FC scoring head (~18 min total on CPU)
-- **Reasoning-Guided Training** — Dual-head architecture with shared encoder: reasoning head generates rationale text, score head uses reasoning + features for prediction; supports knowledge distillation
-- **Hybrid Semantic Encoder** — TextCNN + SBERT + cross-attention alignment + gated fusion; combines local n-gram patterns with global semantic similarity
-- **Length-Adaptive Processing** — Categorises answers by length ratio (very_short/short/medium/long) and applies strategy-specific feature extraction; 12 additional adaptive features
-- **Domain Pre-training Pipeline** — Continued MLM pre-training of DeBERTa/RoBERTa on domain corpus (reference answers, questions, textbook text); two-stage fine-tuning integration
-- **Multi-Model Ensemble** — `MultiModelEnsemble` combines HybridGrader, TextCNN, SBERT, and any scoring model via weighted blending with agreement-based confidence
-- **Enhanced Error Analysis** — Reasoning quality metrics (BLEU, ROUGE-L, BERTScore), length-category performance breakdown, cross-attention alignment heatmaps
-- **A/B Testing Framework** — Paired t-tests + bootstrap confidence intervals for statistically rigorous model comparison
+- **20 pre-loaded sample questions** spanning neural networks, DHCP, photosynthesis, TCP/IP, DNA, machine learning, cybersecurity, and more
+- **Interactive grading** — Type an answer, submit, and receive a score, confidence, AI feedback, and reference answer in real time
+- **Score visualisation** — Confidence circle, score progress bar, and score distribution chart (Recharts)
+- **Model insights panel** — Displays key metrics (MSE, QWK, Accuracy, F1, sample counts)
+- **Character counter** — Live character count with 1,000-character limit and colour-coded bar
+- **Error handling** — Clear error banners when the backend is unreachable or returns an error
+
+### Training Pipelines
+
+- **TextCNN pipeline** (`asag_cnn_pipeline.py`) — Original 5-epoch training with vocab building and 80/20 split
+- **CPU-optimised hybrid** (`train_cpu.py`) — Frozen DistilBERT embeddings cached to disk, then a lightweight FC scoring head trains in ~18 minutes on CPU
+- **Full hybrid pipeline** (`hybrid_pipeline.py`) — End-to-end transformer + handcrafted features with CombinedLoss (MSE + QWK-proxy), best on GPU
+- **Hyperparameter tuning** (`hyperparameter_tuning.py`) — Optuna TPE search for CNN or hybrid configurations
+- **Score calibration** (`score_calibration.py`) — Platt, isotonic, and temperature scaling with Nelder-Mead-optimised rounding thresholds
+
+### Advanced Modules (v3.0+)
+
+- **Reasoning-guided training** — Dual-head model that generates explanations alongside scores, with knowledge distillation
+- **Hybrid semantic encoder** — Cross-attention between student and reference answer representations
+- **Length-adaptive processing** — Different processing strategies for short/medium/long answers
+- **Domain pre-training** — Masked language model fine-tuning on the ASAG corpus to adapt transformer weights
+- **Multi-model ensemble** — Weighted average, median, max-confidence, and voting strategies with calibrated confidence
+
+### Evaluation & Analysis
+
+- **Error analysis** — Length-category breakdown (MSE/QWK/Accuracy/F1), reasoning quality (BLEU, ROUGE-L, BERTScore)
+- **A/B testing framework** — Paired t-tests + bootstrap confidence intervals for model comparison
+- **Cross-question testing** — Held-out question evaluation to measure generalisation to unseen questions
+- **44 integration tests** — Covering all backend functions (synonym overlap, semantic similarity, relevance scoring, enhanced similarity, reference similarity) and all v3.0+ modules
 
 ---
 
 ## Model Performance
 
-### Random 80/20 Split (`test_model.py`) — Original CNN
+### Results (Random 80/20 Split)
 
-| Metric | Value |
-|--------|-------|
-| Test MSE | 0.1403 |
-| Quadratic Weighted Kappa (QWK) | 0.2607 |
-| Accuracy | 49.6% |
-| F1-score (weighted) | 0.493 |
-| Test samples | 3,038 |
+| Metric | TextCNN (v1) | v3.0 CPU Hybrid | GPU Target |
+|--------|-------------|-----------------|------------|
+| **QWK** | 0.261 | **0.490** | > 0.65 |
+| **Accuracy** | 49.6% | **55.5%** | > 70% |
+| **MSE** | 0.140 | **0.175** | < 0.08 |
+| **F1 (weighted)** | 0.493 | **0.542** | > 0.70 |
 
-### CPU-Optimised Hybrid Model (`train_cpu.py`) — Current Best
-
-| Metric | Value |
-|--------|-------|
-| OOF QWK | **0.490** |
-| OOF Accuracy | **55.5%** |
-| OOF F1-score | **0.542** |
-| OOF MSE | 0.175 |
-| Training time | 18.5 min (CPU) |
-| Architecture | DistilBERT embeddings + 27 HC features → FC head |
-
-### Per-Fold Breakdown
+### CPU Hybrid Training (Per-Fold)
 
 | Fold | QWK | Accuracy | F1 | MSE |
-|------|-----|----------|-----|-----|
-| 1 | 0.484 | 55.3% | 0.539 | 0.175 |
-| 2 | 0.504 | 56.7% | 0.559 | 0.165 |
-| 3 | 0.482 | 54.4% | 0.529 | 0.186 |
+|------|-----|----------|----|-----|
+| 0 | 0.4952 | 0.5536 | 0.5414 | 0.1719 |
+| 1 | 0.4840 | 0.5521 | 0.5347 | 0.1795 |
+| 2 | 0.4906 | 0.5599 | 0.5501 | 0.1726 |
 
-### Target Performance Goals (v3.0+)
+**v1 → v3.0 CPU improvements:**
+- QWK: **+0.229** (0.261 → 0.490, +88% improvement)
+- Accuracy: **+5.9 pp** (49.6% → 55.5%)
+- F1: **+0.049** (0.493 → 0.542)
 
-| Metric | Original CNN | Current (CPU) | Target (GPU) |
-|--------|-------------|---------------|-------------|
-| MSE | 0.140 | **0.175** | < 0.08 |
-| QWK | 0.261 | **0.490** | > 0.65 |
-| Accuracy | 49.6% | **55.5%** | > 70% |
-| F1-score | 0.493 | **0.542** | > 0.70 |
-
-Full targets require GPU training with end-to-end DeBERTa fine-tuning (`hybrid_pipeline.py`) or the reasoning-guided model (`reasoning_guided_training.py`).
-
-### Cross-Question Split (`cross_question_test.py`)
-
-| Metric | Value |
-|--------|-------|
-| Test MSE | 0.1267 |
-| QWK | 0.2916 |
-| Accuracy | 50.7% |
-| F1-score (weighted) | 0.504 |
-| Held-out questions | 57 of 284 |
+### Key Findings
+- Class 1 (partial credit) has the lowest recall (11.7%) — improving middle-ground answer detection is the main path to higher accuracy
+- Short answers have worse metrics (QWK ~0.39) vs long answers (QWK ~0.43)
+- The frozen-encoder + FC head approach on CPU achieved 88% of the QWK improvement in just 18 minutes
 
 ---
 
 ## Dataset
 
-| Property | Value |
-|----------|-------|
-| Source | [Meyerger/ASAG2024](https://huggingface.co/datasets/Meyerger/ASAG2024) |
-| Local file | `asag2024_all.csv` |
-| Total rows | 15,190 |
-| Unique questions | 284 |
-| Average answers/question | ~54 |
-| Grade format | Normalised float 0.0 – 1.0 |
+- **Source**: [ASAG2024 on HuggingFace](https://huggingface.co/datasets/Meyerger/ASAG2024)
+- **Rows**: 15,190 graded short answers
+- **Questions**: 284 unique questions
+- **Source Domains**: Computer Science, Biology, Science
+- **Score Range**: 0.0 – 1.0 (normalised)
+- **Test Split**: 20% (3,038 samples)
 
 ---
 
@@ -145,60 +174,58 @@ Full targets require GPU training with end-to-end DeBERTa fine-tuning (`hybrid_p
 
 ```
 cnn_project/
-├─ ORIGINAL PIPELINE
-├── asag_cnn_pipeline.py       # TextCNN training pipeline
-├── asag_data.py               # Data loading utilities
-├── test_model.py              # Model evaluation (80/20 split)
-├── cross_question_test.py     # Cross-question evaluation
-├── save_test_set.py           # Export test set
-├── backend.py                 # Original FastAPI backend (POST /predict)
-├── textcnn_model.pth          # Trained TextCNN weights
 │
-├─ ENHANCED PIPELINE (v2.0)
-├── preprocessing.py           # Advanced text preprocessing
-├── distilbert_pipeline.py     # DistilBERT training with K-Fold CV
-├── ensemble_model.py          # Model ensemble utilities
-├── question_models.py         # Question-specific model training
-├── reference_answers.py       # Reference answer database & similarity
-├── scoring_improvements.py    # Calibration & adaptive scoring
-├── content_correctness.py     # Keyword matching, synonym detection, word order analysis
-├── grammar_detection.py       # POS-based grammar tolerance scoring
-├── backend_enhanced.py        # Enhanced FastAPI backend (configurable)
+├── backend.py                   # FastAPI server — TextCNN + semantic scoring + content checks
+├── asag_cnn_pipeline.py         # Original TextCNN training pipeline (5 epochs, 80/20 split)
+├── asag_data.py                 # Dataset loading, vocab building, TF-IDF
 │
-├─ IMPROVED PIPELINE (v3.0)
-├── feature_engineering.py     # 27 handcrafted features: readability, lexical, POS, structural, similarity
-├── training_utils.py          # CombinedLoss (QWK+Huber), ScoreRounder, class weighting, metrics
-├── hybrid_pipeline.py         # Hybrid DeBERTa/RoBERTa + features model, 5-Fold CV, QWK-optimised
-├── score_calibration.py       # Platt, Isotonic, Temperature scaling; EnsembleCalibrator auto-selection
-├── hyperparameter_tuning.py   # Optuna TPE tuning for CNN and hybrid pipelines
-├── error_analysis.py          # Per-class breakdown, bias, SHAP, length-category, reasoning quality, A/B testing
+├── preprocessing.py             # Advanced text preprocessing (lemmatization, stemming, POS)
+├── distilbert_pipeline.py       # DistilBERT 5-fold cross-validation training
+├── ensemble_model.py            # Multi-model ensemble with calibrated confidence
+├── question_models.py           # Per-question Ridge regression models
+├── reference_answers.py         # Reference answer database + BERTScore
+├── scoring_improvements.py      # Calibrated scoring blend with adaptive weights
+├── content_correctness.py       # Keyword checking, word-order analysis, content override
+├── grammar_detection.py         # POS-based grammar tolerance scoring
 │
-├─ ADVANCED MODULES (v3.0+)
-├── train_cpu.py               # CPU-optimised training: pre-compute embeddings → train FC head (~18 min)
-├── reasoning_guided_training.py # Dual-head model: reasoning + scoring with knowledge distillation
-├── hybrid_semantic_encoder.py # TextCNN + SBERT + cross-attention + gated fusion encoder
-├── length_adaptive_processor.py # Length-adaptive feature extraction (12 extra features, 39 total)
-├── domain_pretraining.py      # MLM domain adaptation pipeline for DeBERTa/RoBERTa
+├── feature_engineering.py       # 27 handcrafted features (lexical, syntactic, semantic)
+├── training_utils.py            # CombinedLoss, CosineScheduler, training helpers
+├── hybrid_pipeline.py           # Full hybrid transformer + HC features pipeline
+├── train_cpu.py                 # CPU-optimised DistilBERT+FC training (~18 min)
+├── score_calibration.py         # Platt/Isotonic/Temperature scaling + ScoreRounder
+├── hyperparameter_tuning.py     # Optuna TPE hyperparameter search
+├── error_analysis.py            # Error analysis + A/B testing framework
 │
-├─ TESTS
+├── reasoning_guided_training.py # Dual-head score + explanation model
+├── hybrid_semantic_encoder.py   # Cross-attention semantic encoder
+├── length_adaptive_processor.py # Length-aware answer processing
+├── domain_pretraining.py        # MLM domain pre-training for transformers
+│
+├── test_model.py                # Standard model evaluation (random 80/20 split)
+├── cross_question_test.py       # Cross-question generalisation evaluation
+├── save_test_set.py             # Export test_set.csv from dataset
+│
+├── asag2024_all.csv             # Full ASAG2024 dataset (15,190 rows)
+├── textcnn_model.pth            # Trained TextCNN model weights
+├── test_set.csv                 # Exported test set (3,038 rows)
+│
+├── hybrid_models/               # CPU training outputs
+│   ├── embeddings_cache.npy     # Cached DistilBERT embeddings
+│   ├── scoring_head_fold*.pth   # Per-fold FC head weights
+│   ├── rounder_fold*.npy        # Per-fold optimised rounding thresholds
+│   ├── cpu_training_summary.json
+│   └── error_report.json
+│
 ├── tests/
-│   └── test_modules.py        # 27 integration tests for all v3.0+ modules
+│   └── test_modules.py          # 44 integration tests
 │
-├─ DATA & MODELS
-├── asag2024_all.csv           # Full ASAG2024 dataset (15,190 rows)
-├── test_set.csv               # Saved 20% test split (3,038 rows)
-
-├── reference_database.json    # Reference answers database
-├── distilbert_cv_summary.json # K-Fold CV results
-├── question_models/           # Question-specific model weights
-├── distilbert_fold_*.pth      # DistilBERT fold models
-│
-├─ FRONTEND
 ├── frontend/
-│   ├── src/App.js             # React components
-│   ├── src/App.css            # Styling
-│   ├── public/index.html      # HTML shell
-│   └── package.json           # Node dependencies
+│   ├── src/
+│   │   ├── App.js               # Main React component (20 questions, grading UI)
+│   │   ├── App.css              # Styles
+│   │   └── index.js             # Entry point
+│   ├── public/index.html        # HTML shell
+│   └── package.json             # Node dependencies
 │
 └── README.md
 ```
@@ -209,11 +236,8 @@ cnn_project/
 
 ### Prerequisites
 
-Ensure you have the following installed on your system:
-
-- **Python 3.10+** — Download from [python.org](https://www.python.org/downloads/)
-- **Node.js 16+** — Download from [nodejs.org](https://nodejs.org/) (includes npm)
-- **Git** (optional, for version control)
+- **Python 3.10+** — [python.org](https://www.python.org/downloads/)
+- **Node.js 16+** — [nodejs.org](https://nodejs.org/) (includes npm)
 
 ### Step 1: Set up Python virtual environment
 
@@ -232,8 +256,11 @@ pip install torch scikit-learn pandas numpy
 # FastAPI backend server
 pip install fastapi "uvicorn[standard]" pydantic
 
-# Optional: for dataset exploration
-pip install tqdm openpyxl
+# NLP & transformer models
+pip install nltk transformers
+
+# Optional: for calibration, tuning, and evaluation
+pip install bert_score optuna scipy tqdm openpyxl
 ```
 
 **Full list of Python packages:**
@@ -245,8 +272,12 @@ numpy                 # Numerical computing
 fastapi               # Web framework for REST API
 uvicorn[standard]     # ASGI server to run FastAPI
 pydantic              # Data validation (API request/response models)
-tqdm                  # Progress bars (optional, for training)
-openpyxl              # Excel export (optional, for data analysis scripts)
+nltk                  # WordNet synonyms, lemmatization, POS tagging
+transformers          # HuggingFace DistilBERT for semantic similarity
+bert_score            # Semantic evaluation using BERT (optional)
+optuna                # Hyperparameter optimisation (optional)
+scipy                 # Score rounding optimisation (optional)
+tqdm                  # Progress bars (optional)
 ```
 
 ### Step 3: Install Node.js dependencies (Frontend)
@@ -256,7 +287,7 @@ cd c:\Users\user\Documents\cnn_project\frontend
 npm install
 ```
 
-**Frontend packages installed:**
+**Frontend packages:**
 - `react@18.2.0` — UI library
 - `react-dom@18.2.0` — React DOM rendering
 - `axios@1.13.5` — HTTP client for API calls
@@ -265,167 +296,73 @@ npm install
 
 ### Step 4: Verify required data files
 
-Ensure these files exist in the project root:
-
 | File | Approx. Size | Purpose |
 |------|--------------:|---------|
-| `asag2024_all.csv` | ~2.1 MB | Full ASAG2024 dataset (15,190 rows). NOT included in the GitHub repo — download below.
-| `textcnn_model.pth` | ~55 MB | Pre-trained model weights. NOT included in the GitHub repo — either train locally or download the weights if provided separately.
+| `asag2024_all.csv` | ~2.1 MB | Full ASAG2024 dataset (15,190 rows) |
+| `textcnn_model.pth` | ~55 MB | Pre-trained TextCNN model weights |
 
+These files are **not** included in the repository. To obtain them:
 
-**Important — large files and repo contents**
+- **`asag2024_all.csv`**: Download from [HuggingFace](https://huggingface.co/datasets/Meyerger/ASAG2024) or export using:
+  ```python
+  from datasets import load_dataset
+  ds = load_dataset('Meyerger/ASAG2024')
+  df = ds['train'].to_pandas()
+  df.to_csv('asag2024_all.csv', index=False)
+  ```
 
-- The GitHub repository contains source code, the frontend, and small helper files only. Large binary and dataset files (listed above) are not bundled in the repository to keep the repo small and fast to clone. If you cloned a minimal/clean copy from GitHub you will need to download these files separately before running the project.
-
-**Where to get the files**
-
-- `asag2024_all.csv`: download from the HuggingFace dataset page: https://huggingface.co/datasets/Meyerger/ASAG2024 or export the CSV using the `datasets` library.
-
-- `textcnn_model.pth`: either (a) train locally using `asag_cnn_pipeline.py` (see "Train the model" below), or (b) download the model weights if they are provided to you separately (for example via a release asset, shared drive, or direct URL).
-
-**Download examples**
-
-Using HuggingFace `datasets` to produce `asag2024_all.csv`:
-
-```python
-from datasets import load_dataset
-ds = load_dataset('Meyerger/ASAG2024')
-df = ds['train'].to_pandas()
-df.to_csv('asag2024_all.csv', index=False)
-```
-
-**If you need these files tracked in Git**
-
-- Use Git LFS to track large files instead of committing them directly. Example:
-
-```powershell
-cd c:\Users\user\Documents\cnn_project
-git lfs install
-git lfs track "*.pth"
-git lfs track "*.vec"
-git add .gitattributes
-git add textcnn_model.pth
-git commit -m "Add model and embeddings via LFS"
-git push origin main
-```
-
-Note: pushing large files still depends on network stability and your Git host's LFS quotas.
+- **`textcnn_model.pth`**: Train locally using `asag_cnn_pipeline.py` (see training section below).
 
 ### Step 5 (Optional): Export test set
-
-### Step 5 (Optional): Export test set
-
-If `test_set.csv` doesn't exist, regenerate it:
 
 ```bash
 .venv\Scripts\python save_test_set.py
 ```
 
-This creates `test_set.csv` with 3,038 test samples (20% of dataset).
+Creates `test_set.csv` with 3,038 test samples (20% of dataset).
 
-### Step 6 (Enhanced): Install additional dependencies for v2.0 / v3.0
+---
 
-For the enhanced and improved pipelines (transformers, calibration, hyperparameter tuning):
+## Quick Start
 
+After completing installation, run in separate terminals:
+
+**Terminal 1 — Backend API:**
 ```bash
-.venv\Scripts\pip install nltk transformers bert_score scikit-learn optuna scipy
+cd c:\Users\user\Documents\cnn_project
+.venv\Scripts\activate
+.venv\Scripts\uvicorn backend:app --reload --port 8000
 ```
+Visit **http://localhost:8000/docs** for interactive API docs.
 
-**Additional packages for enhanced features:**
-```
-nltk              # Advanced text processing (lemmatization, stemming, POS tagging)
-transformers      # HuggingFace models (DeBERTa, RoBERTa, DistilBERT, etc.)
-bert_score        # Semantic evaluation using BERT
-optuna            # Hyperparameter optimisation (v3.0 — replaces scikit-optimize)
-scipy             # Score rounding optimisation (Nelder-Mead minimisation)
-```
-
-**Optional — SHAP for explainability:**
+**Terminal 2 — Frontend:**
 ```bash
-.venv\Scripts\pip install shap
+cd c:\Users\user\Documents\cnn_project\frontend
+node_modules\.bin\react-scripts start
+```
+Opens **http://localhost:3000** automatically.
+
+**Terminal 3 (optional) — Evaluation:**
+```bash
+cd c:\Users\user\Documents\cnn_project
+.venv\Scripts\activate
+.venv\Scripts\python test_model.py                 # Random 80/20 split
+.venv\Scripts\python cross_question_test.py         # Held-out question split
 ```
 
 ---
 
-## Using the Enhanced Pipeline (v2.0)
+## Training
 
-### Step 1: Train DistilBERT with 5-Fold Cross-Validation
-
-```bash
-.venv\Scripts\python distilbert_pipeline.py
-```
-
-This trains DistilBERT on the full dataset using stratified 5-fold CV with:
-- Class-weighted loss for imbalanced data
-- Early stopping based on F1 score
-- Automatic calibration on validation folds
-
-**Output:**
-- `distilbert_fold_0.pth` through `distilbert_fold_4.pth` (5 fold models)
-- `distilbert_cv_summary.json` (cross-validation results)
-
-**Expected improvement:** QWK increases from 0.26 → 0.45+, Accuracy increases to 60%+
-
-### Step 2: Train Question-Specific Models
+### Option A: TextCNN (Original, ~5 min)
 
 ```bash
-.venv\Scripts\python question_models.py
+.venv\Scripts\python asag_cnn_pipeline.py
 ```
 
-Trains lightweight Ridge regression models for each question to capture question-specific patterns:
-- One model per question with ≥20 samples
-- Extracts linguistic features (length, tokens, n-grams)
-- Saves models to `question_models/` directory
+Trains for 5 epochs, saves weights to `textcnn_model.pth` and writes `test_set.csv`.
 
-### Step 3: Build Reference Answer Database
-
-```bash
-.venv\Scripts\python reference_answers.py
-```
-
-Creates `reference_database.json` with:
-- One primary reference answer per question
-- Augmented variations (keywords, paraphrases)
-- BERTScore-ready for semantic similarity
-
-### Step 4: Start Enhanced Backend
-
-```bash
-# Use enhanced backend instead of original
-.venv\Scripts\uvicorn backend_enhanced:app --reload --port 8000
-```
-
-The enhanced backend automatically:
-- Loads DistilBERT fold models (if available)
-- Uses question-specific predictions (if available)
-- Applies reference answer similarity
-- Calibrates confidence scores
-- Implements topical relevance filtering
-
-**Configuration flags in `backend_enhanced.py`:**
-```python
-USE_DISTILBERT = False      # Enable when fold models are trained
-USE_ENSEMBLE = False        # Enable for ensemble blending
-USE_QUESTION_MODELS = False # Enable when question models are trained
-USE_REFERENCE_DB = True     # Use reference answer database (recommended)
-```
-
----
-
-## Improved Pipeline (v3.0)
-
-The v3.0 pipeline targets QWK > 0.65 and Accuracy > 70% through a hybrid architecture
-(transformer + handcrafted features), QWK-optimised loss, and post-processing calibration.
-
-### Step 1: Install v3.0 dependencies
-
-```bash
-.venv\Scripts\pip install optuna scipy nltk transformers accelerate
-```
-
-### Step 2: Train the Model
-
-#### Recommended: CPU-Optimised Training (~18 min)
+### Option B: CPU-Optimised Hybrid (~18 min, recommended)
 
 Pre-computes DistilBERT embeddings once, then trains a lightweight FC scoring head:
 
@@ -439,12 +376,12 @@ Pre-computes DistilBERT embeddings once, then trains a lightweight FC scoring he
 
 **Output:**
 - `hybrid_models/embeddings_cache.npy` — cached DistilBERT embeddings (reusable)
-- `hybrid_models/scoring_head_fold0.pth` ... — per-fold FC head weights
-- `hybrid_models/rounder_fold0.npy` ... — per-fold optimised rounding thresholds
+- `hybrid_models/scoring_head_fold*.pth` — per-fold FC head weights
+- `hybrid_models/rounder_fold*.npy` — per-fold optimised rounding thresholds
 - `hybrid_models/cpu_training_summary.json` — full CV metrics
 - `hybrid_models/error_report.json` — detailed error analysis
 
-#### Alternative: Full End-to-End Training (GPU recommended)
+### Option C: Full Hybrid Pipeline (GPU recommended)
 
 ```bash
 # Default: DeBERTa-v3-small, 5-fold CV, 8 epochs
@@ -457,15 +394,10 @@ Pre-computes DistilBERT embeddings once, then trains a lightweight FC scoring he
 .venv\Scripts\python hybrid_pipeline.py --model distilbert --folds 2 --epochs 2 --max_len 128
 ```
 
-**Output files:**
-- `hybrid_models/hybrid_fold0.pth` … `hybrid_fold4.pth` — per-fold model weights
-- `hybrid_models/rounder_fold0.npy` … — per-fold optimised rounding thresholds
-- `hybrid_models/hybrid_cv_summary.json` — full CV metrics report
-
-### Step 3: Tune Hyperparameters (Optional)
+### Hyperparameter Tuning (Optional)
 
 ```bash
-# Tune the CNN pipeline — fast, CPU-friendly (30 trials ≈ 20 min)
+# Tune the CNN pipeline (30 trials ≈ 20 min)
 .venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 30
 
 # Tune the hybrid transformer (GPU recommended, 10 trials ≈ 2–4 h)
@@ -475,21 +407,214 @@ Pre-computes DistilBERT embeddings once, then trains a lightweight FC scoring he
 .venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 50 --storage optuna_cnn.db
 ```
 
-Best parameters are saved to `best_params_cnn.json` / `best_params_hybrid.json`.
-
-### Step 4: Run Error Analysis
-
-Error analysis runs automatically at the end of `train_cpu.py`. To run standalone:
+### Domain Pre-training (GPU only)
 
 ```bash
-.venv\Scripts\python error_analysis.py
+.venv\Scripts\python domain_pretraining.py --model deberta --epochs 3
 ```
 
-The enhanced error analyser now includes:
-- **Length-category breakdown** — MSE/QWK/Accuracy/F1 per answer length category
-- **Reasoning quality** — BLEU, ROUGE-L, BERTScore for generated rationales
-- **Cross-attention heatmaps** — Visualise student–reference token alignment
-- **A/B testing** — Paired t-tests + bootstrap CIs for model comparison
+### Reasoning-Guided Training (GPU only)
+
+```bash
+.venv\Scripts\python reasoning_guided_training.py --stage full
+.venv\Scripts\python reasoning_guided_training.py --stage distill  # knowledge distillation
+```
+
+---
+
+## API Reference
+
+### `POST /predict`
+
+**Request:**
+```json
+{
+  "question": "Explain backpropagation in neural networks.",
+  "answer": "It uses gradient descent to propagate errors backward through the layers."
+}
+```
+
+**Response:**
+```json
+{
+  "score": 0.5,
+  "confidence": 0.87,
+  "feedback": "Your answer shows some understanding but is missing key details.",
+  "reference_answer": "Backpropagation is a supervised learning algorithm that computes the gradient of the loss function with respect to each weight by propagating errors backward through the network layers using the chain rule."
+}
+```
+
+### `GET /`
+
+Health check — returns `{"status": "ASAG backend running", "endpoint": "POST /predict"}`.
+
+---
+
+## Scoring System
+
+### Score Scale
+
+| Score | Meaning | Interpretation |
+|-------|---------|----------------|
+| **0.0** | Incorrect / Off-topic | Answer does not address the question or is completely wrong |
+| **0.5** | Partially Correct | Answer shows some understanding but is incomplete or lacks key details |
+| **1.0** | Excellent / Complete | Answer demonstrates full understanding with all key concepts covered |
+
+### How Scoring Works
+
+The backend uses a **calibrated hybrid approach** combining multiple scoring signals:
+
+1. **TextCNN Model Prediction** — TextCNN trained on 15,190 graded answers with 4 convolutional kernels (sizes 2–5), 128 filters each, plus a similarity score and 27 handcrafted features
+
+2. **Semantic Similarity Features** (8 features computed per answer):
+   - **Unigram overlap** (weight: 10%) — Direct word overlap with reference
+   - **Bigram overlap** (weight: 15%) — Phrase-level 2-gram matching
+   - **Trigram overlap** (weight: 10%) — Longer phrase matching
+   - **TF-IDF similarity** (weight: 15%) — Weighted term overlap using corpus-wide IDF scores
+   - **Length ratio** (weight: 5%) — Penalizes extremely short answers
+   - **WordNet synonym overlap** (weight: 20%) — Matches words via synonyms, hypernyms, and hyponyms (e.g., "produces" ≈ "generates", "energy" ≈ "power")
+   - **DistilBERT semantic similarity** (weight: 25%) — Sentence-level meaning comparison using DistilBERT mean-pooled embeddings + cosine similarity
+
+3. **Content Correctness & Grammar Tolerance**:
+   - Checks whether key concepts from the reference appear in the student answer (using WordNet synonyms)
+   - Detects scrambled-but-correct answers (all words present, order wrong) and applies a content override boost
+   - Assesses grammar quality via POS tagging and applies tolerance for minor issues (fair for ESL students)
+
+4. **Adaptive Score Blending**:
+   - Model prediction weight: **35%**, Similarity features weight: **65%**
+   - Weights adapt based on agreement between signals
+   - High agreement → trust model more; disagreement → trust similarity features more
+   - Content override boost applied when content is correct despite poor structure
+
+### Relevance Gate
+
+Before scoring, answers are checked for **topical relevance** using three signals:
+
+1. **Question overlap** — Jaccard similarity between question and answer tokens
+2. **Reference overlap** — Jaccard similarity between reference and answer tokens
+3. **Synonym-expanded overlap** — WordNet-expanded overlap with the reference answer
+
+The maximum of these three signals is compared against a threshold (0.04). If below threshold, the answer is scored 0.0 with an "off-topic" feedback. This three-signal approach prevents synonym-rich but valid answers from being incorrectly flagged as off-topic.
+
+### Confidence Score
+
+| Range | Interpretation |
+|-------|---------------|
+| 0.80–0.99 | Model and similarity features strongly agree |
+| 0.60–0.79 | Moderate agreement or clear patterns |
+| 0.55–0.59 | Uncertainty — conflicting signals |
+
+Off-topic answers return confidence = **0.97** (very confident they're wrong).
+
+### Example Scoring
+
+**Question:** "What is the Dynamic Host Configuration Protocol (DHCP)? What is it used for?"
+
+| Student Answer | Score | Feedback |
+|----------------|-------|----------|
+| Full DHCP explanation with uses, IP assignment, and related protocols | **1.0** | "Well done! Your answer covers the main points accurately and concisely." |
+| "DHCP is a protocol that assigns IP addresses automatically" | **0.5** | "Good start, but your answer could be more precise." |
+| "AI, or Artificial Intelligence, is a field of computer science." | **0.0** | "Off-topic response detected." |
+
+---
+
+## Model Architecture
+
+### TextCNN (Inference Model)
+
+| Layer | Details |
+|-------|---------|
+| Embedding | 300-dim, vocab-size × 300, padding_idx=0 |
+| Conv2D ×4 | Kernel sizes [2, 3, 4, 5], 128 filters each |
+| Activation | ReLU |
+| Pooling | Max-over-time (per filter) |
+| Dropout | p = 0.4 |
+| Fully Connected | 540 → 1 (512 conv + 1 sim + 27 HC features) |
+| Output | Sigmoid (regression, 0–1) |
+| Loss | MSELoss |
+| Optimiser | Adam (lr = 1e-3) |
+
+### Semantic Encoder (DistilBERT)
+
+| Component | Details |
+|-----------|---------|
+| Model | `distilbert-base-uncased` (loaded via `DistilBertForMaskedLM` → `.distilbert` base, avoids UNEXPECTED key warnings) |
+| Purpose | Sentence-level semantic similarity between student and reference answers |
+| Pooling | Mean pooling over token embeddings (excluding padding) |
+| Similarity | Cosine similarity, clamped to [0, 1] |
+
+### Classification Scheme
+
+Continuous 0–1 grades are binned into 3 classes for classification metrics:
+
+| Class | Grade Range | Label |
+|-------|-------------|-------|
+| 0 | 0.00 – 0.32 | Low |
+| 1 | 0.33 – 0.66 | Medium |
+| 2 | 0.67 – 1.00 | High |
+
+---
+
+## Module Reference
+
+### Content Correctness (`content_correctness.py`)
+
+Verifies key concepts from reference answers appear in student responses:
+
+```python
+from content_correctness import ContentCorrectnessChecker
+
+checker = ContentCorrectnessChecker()
+
+# Check keyword presence with WordNet synonyms
+result = checker.check_keyword_presence(student_answer, reference_answer, threshold=0.6)
+# → {'match_score': 0.8, 'content_correct': True, 'matched_keywords': [...]}
+
+# Detect scrambled-but-correct answers
+override = checker.compute_content_override_score(student_answer, reference_answer)
+# → {'override_score': 0.85, 'should_boost': True, 'boost_amount': 0.35}
+```
+
+### Grammar Tolerance (`grammar_detection.py`)
+
+POS-based grammar assessment that avoids harsh penalties for imperfect structure:
+
+```python
+from grammar_detection import GrammarDetector
+
+detector = GrammarDetector()
+assessment = detector.assess_grammar_tolerance(
+    "The system it uses gradients for learning the weights in layers"
+)
+# → {'tolerance_score': 0.85, 'recommendation': 'be_lenient', 'violations': {...}}
+```
+
+### Feature Engineering (`feature_engineering.py`)
+
+Extracts 27 handcrafted features per answer:
+
+```python
+from feature_engineering import extract_all_features, FEATURE_NAMES
+
+vec = extract_all_features(student_answer, reference_answer)  # shape (27,)
+print(dict(zip(FEATURE_NAMES, vec)))
+```
+
+### Score Calibration (`score_calibration.py`)
+
+```python
+from score_calibration import EnsembleCalibrator, ScoreRounder
+
+cal = EnsembleCalibrator(methods=['platt', 'isotonic', 'temperature'])
+cal.fit(val_preds, val_labels)
+calibrated = cal.transform(test_preds)
+
+rounder = ScoreRounder(num_classes=3)
+rounder.fit(calibrated, val_labels)
+final_scores = rounder.predict_normalised(calibrated)
+```
+
+### Error Analysis (`error_analysis.py`)
 
 ```python
 from error_analysis import ABTestFramework
@@ -503,700 +628,74 @@ result = ABTestFramework.compare(
 # → prints winner with p-value and 95% CI
 ```
 
-### Step 5 (GPU only): Domain Pre-training
+---
 
-Adapt DeBERTa to the ASAG domain before fine-tuning:
+## Testing
 
-```bash
-# Build domain corpus from reference answers + fine-tune MLM
-.venv\Scripts\python domain_pretraining.py --model deberta --epochs 3
-
-# Then use domain-adapted weights for training:
-python -c "from domain_pretraining import init_hybrid_with_domain_weights; model, tok = init_hybrid_with_domain_weights('domain_pretrained/best_model')"
-```
-
-### Step 6 (GPU only): Reasoning-Guided Training
-
-Dual-head model that generates explanations alongside scores:
-
-```bash
-.venv\Scripts\python reasoning_guided_training.py --stage full
-.venv\Scripts\python reasoning_guided_training.py --stage distill  # knowledge distillation
-```
-
-### Step 7: Run Integration Tests
+Run the full integration test suite:
 
 ```bash
 .venv\Scripts\python -m pytest tests/test_modules.py -v
-# 27 tests covering all v3.0+ modules
+# 44 tests covering all modules
 ```
 
-### Step 8: Score Calibration API
-
-```python
-from score_calibration import EnsembleCalibrator, ScoreRounder
-
-# Auto-select best calibration method
-cal = EnsembleCalibrator(methods=['platt', 'isotonic', 'temperature'])
-cal.fit(val_preds, val_labels)
-calibrated = cal.transform(test_preds)
-
-# Then optimise rounding to maximise QWK
-rounder = ScoreRounder(num_classes=3)
-rounder.fit(calibrated, val_labels)
-final_scores = rounder.predict_normalised(calibrated)
-```
-
-### Step 6: Feature Engineering API
-
-```python
-from feature_engineering import extract_all_features, batch_extract_features, FEATURE_NAMES
-
-# Single answer
-vec = extract_all_features(
-    student_answer="Mitochondria produce ATP via cellular respiration",
-    reference_answer="The mitochondria is the powerhouse of the cell producing ATP"
-)
-print(dict(zip(FEATURE_NAMES, vec)))
-
-# Batch
-import numpy as np
-X = batch_extract_features(student_list, reference_list)  # shape (N, 27)
-```
+**Test coverage includes:**
+- `LengthAdaptiveProcessor` — short/medium/long answer handling
+- `ErrorAnalyser` — metric computation and error categorisation
+- `ABTestFramework` — statistical comparison between models
+- `DomainPretraining` — corpus building and training configuration
+- `MultiModelEnsemble` — prediction blending and method selection
+- `CrossAttentionVisualization` — attention heatmap generation
+- `synonym_overlap()` — WordNet exact, synonym, hypernym/hyponym, and unrelated-word matching
+- `semantic_similarity()` — DistilBERT sentence similarity (identical/related/unrelated pairs)
+- `relevance_score()` — On-topic vs off-topic classification with synonym-rich answers
+- `enhanced_similarity()` — Full 8-feature similarity computation
+- `reference_similarity()` — Weighted combination and pre-computed feature reuse
 
 ---
 
-## Quick Start (5 minutes)
+## Performance Summary
 
-After completing installation, run all three components in separate terminals:
-
-**Terminal 1: Backend API**
-```bash
-cd c:\Users\user\Documents\cnn_project
-.venv\Scripts\activate
-.venv\Scripts\uvicorn backend:app --reload --port 8000
-```
-✓ If successful, visit **http://localhost:8000/docs** to see interactive API docs
-
-**Terminal 2: Frontend**
-```bash
-cd c:\Users\user\Documents\cnn_project\frontend
-node_modules\.bin\react-scripts start
-```
-✓ If successful, browser opens **http://localhost:3000** automatically
-
-**Terminal 3 (optional): Run evaluations**
-```bash
-cd c:\Users\user\Documents\cnn_project
-.venv\Scripts\activate
-
-# Standard evaluation (random 80/20 split)
-.venv\Scripts\python test_model.py
-
-# Cross-question evaluation (held-out questions)
-.venv\Scripts\python cross_question_test.py
-```
+| Metric | TextCNN (v1) | v3.0 CPU Hybrid | GPU Target |
+|--------|-------------|-----------------|------------|
+| QWK | 0.261 | **0.490** | > 0.65 |
+| Accuracy | 49.6% | **55.5%** | > 70% |
+| MSE | 0.140 | **0.175** | < 0.08 |
+| F1-score | 0.493 | **0.542** | > 0.70 |
+| Training time | ~5 min | **18.5 min (CPU)** | ~2h (GPU) |
+| Off-topic detection | None | Yes (3-signal) | Yes |
+| Synonym matching | None | WordNet + DistilBERT | WordNet + DistilBERT |
+| Feature input | Token embeddings | + 27 HC + sim score | + 39 features |
+| Explainability | None | ErrorAnalyser | + SHAP + heatmaps |
 
 ---
 
 ## Troubleshooting
 
 ### "No module named 'torch'"
-**Solution:** Ensure virtual environment is activated and pip install completed:
+Ensure virtual environment is activated:
 ```bash
 .venv\Scripts\activate
-.venv\Scripts\pip install torch scikit-learn pandas fastapi uvicorn pydantic
+.venv\Scripts\pip install torch scikit-learn pandas fastapi uvicorn pydantic nltk transformers
 ```
 
-### "Could not reach the grading server" (frontend error)
-**Solution:** Backend must be running. In Terminal 1, start:
+### "Could not reach the grading server"
+Backend must be running:
 ```bash
 .venv\Scripts\uvicorn backend:app --reload --port 8000
 ```
 
-### Port 3000 already in use (React error)
-**Solution:** Kill the process or use a different port:
+### Port 3000 already in use
 ```bash
-.venv\Scripts\activate
 cd frontend
 node_modules\.bin\react-scripts start --port 3001
 ```
 
-### "npm: command not found"
-**Solution:** Node.js/npm not installed or not in PATH. Download from [nodejs.org](https://nodejs.org/) and restart your terminal.
-
 ### Model file too large / slow to load
-The `textcnn_model.pth` (~55 MB) loads into GPU memory on first request. This is normal and takes ~2–5 seconds.
+The TextCNN model (~55 MB) plus DistilBERT (~260 MB) load on first request. This is normal and takes ~5–10 seconds on CPU.
 
----
-
-### 1 — Train the model
-
-```bash
-.venv\Scripts\python asag_cnn_pipeline.py
-```
-
-Trains for 5 epochs, saves weights to `textcnn_model.pth` and writes `test_set.csv`.
-
-### 2 — Run evaluation
-
-```bash
-# Standard random-split evaluation
-.venv\Scripts\python test_model.py
-
-# Cross-question generalisation test
-.venv\Scripts\python cross_question_test.py
-```
-
-### 3 — Start the backend API
-
-```bash
-.venv\Scripts\uvicorn backend:app --reload --port 8000
-```
-
-API docs available at **http://localhost:8000/docs**
-
-### 4 — Start the frontend
-
-```bash
-cd frontend
-node_modules\.bin\react-scripts start
-```
-
-Open **http://localhost:3000** in your browser.
-
----
-
-## API Reference
-
-### `POST /predict`
-
-**Request**
-```json
-{
-  "question": "Explain backpropagation in neural networks.",
-  "answer": "It uses gradient descent to propagate errors backward through the layers."
-}
-```
-
-**Response**
-```json
-{
-  "score": 0.5,
-  "confidence": 0.87,
-  "feedback": "Your answer shows some understanding but is missing key details.",
-  "reference_answer": "Backpropagation is a supervised learning algorithm that computes the gradient of the loss function with respect to each weight by propagating errors backward through the network layers using the chain rule."
-}
-```
-
----
-
-## Scoring System
-
-### Score Scale
-
-The system assigns scores on a **0.0 to 1.0 scale**, rounded to the nearest **0.5** for display:
-
-| Score | Meaning | Interpretation |
-|-------|---------|----------------|
-| **0.0** | Incorrect / Off-topic | Answer does not address the question or is completely wrong |
-| **0.5** | Partially Correct | Answer shows some understanding but is incomplete or lacks key details |
-| **1.0** | Excellent / Complete | Answer demonstrates full understanding with all key concepts covered |
-
-### How Scoring Works
-
-The backend uses a **calibrated hybrid approach** that combines:
-
-1. **CNN Model Prediction** — TextCNN trained on 15,190 graded answers
-2. **Semantic Similarity Features** — Multiple similarity metrics between student answer and reference:
-   - **Semantic similarity** — Token overlap and n-gram matching
-   - **TF-IDF similarity** — Weighted term overlap
-   - **N-gram overlap** — Unigram, bigram, and trigram matching
-   - **Length ratio** — Penalizes extremely short answers
-
-3. **Adaptive Blending** — The final score intelligently combines:
-   - Model prediction weight: **35%**
-   - Similarity features weight: **65%**
-   - When model and similarity agree → trust model more
-   - When they disagree → trust semantic features more
-
-This calibrated approach corrects for model underconfidence on high-quality answers that closely match reference solutions.
-
-### Relevance Gate
-
-Before scoring, answers are checked for **topical relevance**:
-
-- **Jaccard similarity** between question and answer tokens
-- **Threshold**: 0.04 (4% minimum overlap after removing stopwords)
-- **If below threshold**: Score = 0.0, feedback = "Off-topic response detected..."
-
-This prevents the model from assigning non-zero scores to completely unrelated answers.
-
-### Example Scoring
-
-**Question:** "What is the Dynamic Host Configuration Protocol (DHCP)? What is it used for?"
-
-| Student Answer | Score | Feedback |
-|----------------|-------|----------|
-| "The Dynamic Host Configuration Protocol (DHCP) is a network management protocol used in Internet Protocol (IP) networks, whereby a DHCP server dynamically assigns an IP address and other network configuration parameters to each device on the network. DHCP has largely replaced RARP (and BOOTP). Uses of DHCP are: Simplifies installation and configuration of end systems, Allows for manual and automatic IP address assignment, May provide additional configuration information (DNS server, netmask, default router, etc.)" | **1.0** | "Well done! Your answer covers the main points accurately and concisely." |
-| "DHCP is a protocol that assigns IP addresses automatically to devices on a network." | **0.5** | "Good start, but your answer could be more precise. Review the reference material for additional detail." |
-| "AI, or Artificial Intelligence, is a field of computer science." | **0.0** | "Off-topic response detected. Your answer should address the specific concept in the question." |
-
-### Confidence Score
-
-The `confidence` field (0.0–0.99) indicates scoring certainty:
-
-- **High confidence (0.80–0.99)**: Model and similarity features strongly agree
-- **Medium confidence (0.60–0.79)**: Moderate agreement or clear patterns
-- **Lower confidence (0.55–0.59)**: Uncertainty due to conflicting signals
-
-Off-topic answers always return confidence = **0.97** (very confident they're wrong).
-
----
-
-## Model Architecture
-
-| Layer | Details |
-|-------|---------|
-| Embedding | 300-dim, vocab-size × 300, padding_idx=0 |
-| Conv2D ×4 | Kernel sizes [2, 3, 4, 5], 128 filters each |
-| Activation | ReLU |
-| Pooling | Max-over-time (per filter) |
-| Dropout | p = 0.5 |
-| Fully Connected | 512 → 1 (regression) |
-| Loss | MSELoss |
-| Optimiser | Adam (lr = 1e-3) |
-
----
-
-## Classification Scheme
-
-Continuous 0–1 grades are binned into 3 classes for classification metrics:
-
-| Class | Grade Range | Label |
-|-------|-------------|-------|
-| 0 | 0.00 – 0.32 | Low |
-| 1 | 0.33 – 0.66 | Medium |
-| 2 | 0.67 – 1.00 | High |
-
----
-
-## Enhanced Modules (v2.0)
-
-### 1. Advanced Preprocessing (`preprocessing.py`)
-
-Sophisticated text processing with NLTK:
-
-```python
-from preprocessing import preprocess_for_model, jaccard_similarity
-
-# Clean and prepare text
-cleaned = preprocess_for_model(
-    "What is backpropagation?",
-    context='training',  # or 'inference'
-    use_extended_stops=False
-)
-
-# Measure topical overlap
-overlap = jaccard_similarity(question, answer)
-```
-
-**Features:**
-- **Lemmatization** — Reduce words to base form (faster → fast)
-- **Stemming** — Aggressive morphological reduction
-- **Stopword removal** — Filter common words
-- **Text normalization** — Lowercase, whitespace cleanup, unicode handling
-- **Jaccard similarity** — Measure topical overlap for relevance gating
-- **N-gram extraction** — Capture phrase-level patterns
-
-**Benefits:**
-- More robust feature extraction
-- Better handling of morphological variations
-- Cleaner input for deep learning models
-
----
-
-### 2. DistilBERT K-Fold Training (`distilbert_pipeline.py`)
-
-Stratified cross-validation pipeline with class balancing:
-
-```python
-from distilbert_pipeline import train_distilbert_kfold
-
-result = train_distilbert_kfold(
-    data_path='asag2024_all.csv',
-    n_splits=5,
-    epochs=10,
-    batch_size=16,
-    learning_rate=2e-5,
-    max_length=512,
-    preprocess=True
-)
-```
-
-**Features:**
-- **Stratified K-Fold** — Ensures class distribution in each fold
-- **Class weighting** — Handles imbalanced grades
-- **Early stopping** — Prevents overfitting (patience=3)
-- **Learning rate scheduling** — Linear warmup + decay
-- **Gradient clipping** — Stabilizes training
-- **Automatic calibration** — Fits confidence scores
-
-**Expected Improvements:**
-- QWK: 0.26 → 0.45+ (70% improvement)
-- Accuracy: 49.6% → 60%+ (20%+ improvement)
-- Better generalization across questions
-
-**Output:**
-- 5 fold models (`distilbert_fold_0.pth` ... `distilbert_fold_4.pth`)
-- CV summary with per-fold metrics
-- Best model selection based on F1 score
-
----
-
-### 3. Ensemble Prediction (`ensemble_model.py`)
-
-Combine multiple models intelligently:
-
-```python
-from ensemble_model import EnsemblePredictor, CalibrationCurve
-
-ensemble = EnsemblePredictor(
-    weights={'cnn': 0.35, 'distilbert': 0.4, 'similarity': 0.25},
-    method='weighted_average'  # or 'median', 'max_confidence', 'voting'
-)
-
-result = ensemble.predict(
-    predictions={'cnn': 0.7, 'distilbert': 0.75, 'similarity': 0.72},
-    confidences={'cnn': 0.8, 'distilbert': 0.85, 'similarity': 0.78}
-)
-
-print(f"Blended score: {result['score']}")  # 0.725
-print(f"Confidence: {result['confidence']}")  # 0.82
-```
-
-**Methods:**
-- **Weighted Average** — Blend predictions by importance
-- **Median** — Robust to outliers
-- **Max Confidence** — Trust highest-confidence model
-- **Voting** — Discretize to classes, use majority vote
-
-**Calibration:**
-- Platt scaling for confidence adjustment
-- Adaptive weighting based on model agreement
-- Conservative confidence when models disagree
-
-**Expected Impact:**
-+5-10% accuracy through diversity and redundancy
-
----
-
-### 4. Question-Specific Models (`question_models.py`)
-
-Lightweight Ridge regression per question:
-
-```python
-from question_models import train_question_models
-
-ensemble = train_question_models(
-    data_path='asag2024_all.csv',
-    min_samples=20,
-    save_dir='question_models'
-)
-
-# Get coverage statistics
-stats = ensemble.get_coverage()
-print(f"Coverage: {stats['coverage_pct']:.1f}%")  # % of questions with models
-
-# Use at inference time
-score = ensemble.predict(question="What is DHCP?", answer="...")
-```
-
-**Features:**
-- **Simple feature extraction** — Token count, char count, unique tokens, avg length, punctuation
-- **Per-question specialization** — Unique patterns captured
-- **Low computational cost** — ~100ms prediction per answer
-- **Graceful fallback** — Returns 0.5 if no model available
-
-**Benefits:**
-- Captures question-specific characteristics
-- Easy to retrain when new data arrives
-- Interpretable feature importance
-- Works well with limited data (20+ samples)
-
-**Expected Coverage:** 90-95% of 284 questions
-
----
-
-### 5. Reference Answer Database (`reference_answers.py`)
-
-Semantic similarity using multiple metrics:
-
-```python
-from reference_answers import (
-    build_reference_database,
-    SemanticSimilarityScorer
-)
-
-# Build database (one-time)
-db = build_reference_database(
-    data_path='asag2024_all.csv',
-    output_path='reference_database.json'
-)
-
-# Use at inference time
-scorer = SemanticSimilarityScorer(use_bert_score=False)
-sim_result = scorer.compare_to_references(
-    student_answer="DHCP is a protocol...",
-    references=["Dynamic Host Configuration...", "DHCP manages IP..."]
-)
-
-print(f"Best match: {sim_result['best_similarity']:.3f}")  # 0.845
-print(f"Average: {sim_result['avg_similarity']:.3f}")      # 0.82
-```
-
-**Similarity Metrics:**
-- **Jaccard similarity** — Set overlap (words in both texts)
-- **Token overlap** — % of reference keywords in answer
-- **Length ratio** — Penalize very short answers
-- **BERTScore** (optional) — Semantic similarity using BERT
-- **Composite score** — Weighted combination
-
-**Database Structure:**
-```json
-{
-  "What is DHCP?": {
-    "references": ["Dynamic Host Configuration Protocol..."],
-    "count": 1,
-    "augmented": ["keywords", "paraphrases"]
-  }
-}
-```
-
----
-
-### 6. Calibrated Scoring (`scoring_improvements.py`)
-
-Adaptive blending with confidence calibration:
-
-```python
-from scoring_improvements import FinalScorer
-
-scorer = FinalScorer()
-
-result = scorer.score_answer(
-    question="Explain backpropagation",
-    answer="It propagates gradients backward...",
-    cnn_pred=0.65,
-    cnn_confidence=0.80,
-    similarity_score=0.70,
-    similarity_confidence=0.75,
-    question_specific_pred=0.68,  # Optional
-    ensemble_pred=0.67             # Optional
-)
-
-print(f"Final score: {result['score']}")          # 0.68
-print(f"Confidence: {result['confidence']}")      # 0.82
-print(f"Feedback: {result['feedback']}")          # "Your answer shows..."
-print(f"Agreement: {result['agreement']:.3f}")    # 0.95
-```
-
-**Scoring Pipeline:**
-1. **Topical Relevance Gate** — Jaccard similarity (Q vs A)
-   - If < 0.04: Return 0.0 (off-topic)
-   - Else: Continue
-
-2. **Adaptive Blending**
-   - High agreement (>0.7): Increase model trust (45/55)
-   - Moderate agreement (0.5-0.7): Default weights (35/65)
-   - Low agreement (<0.5): Trust similarity more (25/75)
-
-3. **Confidence Calibration**
-   - Platt scaling based on validation set
-   - Penalize disagreement between sources
-   - Conservative when signals conflict
-
-4. **Feedback Generation**
-   - Score-based templates (high/mid/low)
-   - Add uncertainty warnings if agreement < 0.5
-
-**Expected Improvements:**
-- Better calibrated confidence (Brier score improvement)
-- Fewer false positives (off-topic detection)
-- More nuanced scoring for borderline cases
-
----
-
-### 7. Content Correctness Check (`content_correctness.py`)
-
-Verify key concepts from reference answers appear in student responses using WordNet synonyms:
-
-```python
-from content_correctness import ContentCorrectnessChecker
-
-checker = ContentCorrectnessChecker()
-
-# Check if reference keywords appear in student answer
-result = checker.check_keyword_presence(
-    student_answer="The system uses gradient descent to learn weights",
-    reference_answer="Backpropagation uses gradient descent to optimize weights",
-    threshold=0.6
-)
-
-print(f"Match score: {result['match_score']:.1%}")  # 0.8
-print(f"Content correct: {result['content_correct']}")  # True
-print(f"Matched keywords: {result['matched_keywords']}")  # [('gradient', 'gradient'), ('descent', 'descent'), ...]
-print(f"Missing keywords: {result['missing_keywords']}")  # ['optimize']
-
-# Check for key concepts (nouns/verbs only)
-concepts = checker.check_key_concepts(student_answer, reference_answer)
-print(f"Concept coverage: {concepts['concept_coverage']:.1%}")  # 85%
-
-# NEW: Check word order (detects scrambled-but-correct answers)
-order = checker.check_word_order(
-    student_answer="energy the mitochondria cell produces for",
-    reference_answer="the mitochondria produces energy for the cell"
-)
-print(f"Order score: {order['order_score']:.1%}")  # 50% (words scrambled)
-print(f"Is scrambled: {order['is_scrambled']}")  # True
-print(f"Content preserved: {order['content_preserved']}")  # True
-
-# NEW: Compute content override score for scrambled answers
-override = checker.compute_content_override_score(student_answer, reference_answer)
-print(f"Override score: {override['override_score']:.1%}")  # 85%
-print(f"Should boost: {override['should_boost']}")  # True
-print(f"Boost amount: {override['boost_amount']:.2f}")  # 0.35
-```
-
-**Features:**
-- **Keyword Extraction** — Extract nouns, verbs, adjectives, adverbs from reference
-- **Synonym Matching** — Use WordNet to find synonyms (e.g., "speeds up" ≈ "accelerates")
-- **Concept Coverage** — Measure presence of key ideas
-- **Tolerance** — Accept morphological variations and synonyms
-- **No Penalty for Grammar** — Focus on content, not structure
-- **Word Order Analysis** — LCS-based detection of scrambled answers (all words present but wrong order)
-- **Content Override Scoring** — Boost scores when content is correct despite poor structure
-
-**Benefits:**
-- Recognize correct answers with alternative phrasing
-- Reduce false negatives for students who know content but write differently
-- Support synonyms like: "propagates errors" = "backpropagates gradients"
-- Boost scores when content is demonstrably correct despite model uncertainty
-
-**Expected Impact:**
-- +5-15% improvement for colloquial/alternative phrasings
-- Better fairness for ESL students
-- Fewer low scores for content-correct but grammatically imperfect answers
-
----
-
-### 8. Grammar Tolerance Detection (`grammar_detection.py`)
-
-Detect grammar patterns without harsh penalties for imperfect structure:
-
-```python
-from grammar_detection import GrammarDetector
-
-detector = GrammarDetector()
-
-# Assess grammar quality and get tolerance factor
-assessment = detector.assess_grammar_tolerance(
-    text="The system it uses gradients for learning the weights in layers"
-)
-
-print(f"Tolerance score: {assessment['tolerance_score']:.2f}")  # 0.85
-print(f"Recommendation: {assessment['recommendation']}")  # 'be_lenient'
-print(f"Violations: {assessment['violations']}")  # {'fragment': False, 'severity': 1}
-print(f"Verb count: {assessment['analysis']['verbs']}")  # 2
-print(f"Noun count: {assessment['analysis']['nouns']}")  # 5
-
-# Get human-readable report
-report = detector.get_grammar_report(text)
-print(report)
-# Grammar Analysis Report:
-# - Tolerance Score: 0.85
-# - Recommendation: be_lenient
-# - Verbs: 2, Nouns: 5, Adjectives: 1
-# - etc.
-```
-
-**POS Analysis:**
-- **Verb Detection** — Identifies present, past, progressive, perfect tenses
-- **Noun Patterns** — Tracks singular/plural and proper nouns
-- **Adjective/Adverb Usage** — Measures modifier density (warns if >40%)
-- **Fragment Detection** — Flags missing main verbs
-- **Agreement Issues** — Checks subject-verb consistency
-
-**Tolerance Scoring:**
-- 1.0 = perfect grammar, apply standard scoring
-- 0.85-0.95 = minor issues, be slightly lenient
-- 0.7-0.85 = moderate issues, apply reduced penalties
-- <0.7 = severe issues, but still accept if content is correct
-
-**How It Works:**
-1. **Extract POS tags** — Parse sentence structure using NLTK
-2. **Identify violations** — Fragment, run-on, agreement issues
-3. **Assess severity** — Rate from 0 (none) to 3 (severe)
-4. **Apply tolerance** — Reduce scoring penalties based on severity
-5. **Preserve content focus** — Never penalize solely for grammar if content is sound
-
-**Example:**
-```
-Student: "The backprop it updates the weights by using the gradients."
-Reference: "Backpropagation updates weights using gradients."
-
-Grammar Issues:
-- Fragment: No
-- Agreement: Slight pronoun redundancy ("The backprop it")
-- Severity: 1 (minor)
-Tolerance Score: 0.95
-
-Result: Tolerate the grammar issue, score based on content
-Final Score Boost: +5% grammar tolerance applied
-
-```
-
-**Benefits:**
-- Fair treatment of ESL students and non-native speakers
-- Focus scoring on conceptual understanding, not writing perfection
-- Recognize that grammar != knowledge
-- Boost scores when content is correct despite awkward phrasing
-
-**Expected Impact:**
-- +3-10% fairness improvement for grammatically diverse answers
-- Reduce penalty for unconventional but clear explanations
-- Better support for diverse writing styles
-
----
-
-## Performance Improvements Achieved
-
-| Metric | Original (v1) | Enhanced (v2) | v3.0 CPU (actual) | v3.0+ GPU (target) |
-|--------|--------------|--------------|-------------------|--------------------|
-| QWK | 0.261 | 0.450+ | **0.490** | > 0.65 |
-| Accuracy | 49.6% | 60%+ | **55.5%** | > 70% |
-| MSE | 0.140 | 0.095 | **0.175** | < 0.08 |
-| F1-score | 0.493 | 0.580+ | **0.542** | > 0.70 |
-| Off-topic detection | None | Yes | Yes | Yes |
-| Score calibration | None | Platt scaling | ScoreRounder | EnsembleCalibrator |
-| Post-processing | None | Threshold | ScoreRounder | ScoreRounder |
-| Loss function | MSE | Weighted MSE | CombinedLoss | CombinedLoss |
-| Feature input | Token embeddings | + sim score | + 27 HC + DistilBERT | + 39 features |
-| Explainability | None | None | ErrorAnalyser | + SHAP + heatmaps |
-| A/B testing | None | None | ABTestFramework | ABTestFramework |
-| Hyperparameter search | Manual | Manual | — | Optuna TPE |
-| Training time | ~5 min | ~30 min | **18.5 min (CPU)** | ~2h (GPU) |
-
-**v1 → v3.0 CPU improvements (actual):**
-- QWK: **+0.229** (0.261 → 0.490, +88% improvement)
-- Accuracy: **+5.9 pp** (49.6% → 55.5%)
-- F1: **+0.049** (0.493 → 0.542)
-
-**Key insight:** The frozen-encoder + FC head approach on CPU achieved **88% of the QWK improvement** in just 18 minutes. Full GPU fine-tuning with domain pre-training, reasoning-guided training, and ensemble blending targets the remaining ~0.16 QWK gap.
-
-**Class-level findings:**
-- Class 1 (partial credit) has the lowest recall (11.7%) — improving middle-ground answer detection is the main path to higher accuracy
-- Short answers have worse metrics (QWK ~0.39) vs long answers (QWK ~0.43)
+### UNEXPECTED key warnings from DistilBERT
+The backend loads DistilBERT via `DistilBertForMaskedLM.from_pretrained()` and extracts the `.distilbert` base transformer. This avoids warnings about `vocab_projector`/`vocab_transform`/`vocab_layer_norm` keys that exist in the MLM checkpoint but aren't needed for embeddings.
 
 ---
 
