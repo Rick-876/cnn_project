@@ -114,8 +114,6 @@ The system consists of:
   6. Hidden FC layer before output (1052 → 256 → 1)
   7. Focal MSE loss for hard-example mining (gamma=1.5)
   8. Label smoothing (epsilon=0.05)
-- **Hyperparameter tuning** (`hyperparameter_tuning.py`) — Optuna TPE search for CNN configurations
-- **Score calibration** (`score_calibration.py`) — Platt, isotonic, and temperature scaling with Nelder-Mead-optimised rounding thresholds
 
 ### Evaluation & Analysis
 
@@ -158,23 +156,14 @@ The system consists of:
 cnn_project/
 │
 ├── backend.py                   # FastAPI server — TextCNN + semantic scoring + content checks
-├── asag_cnn_pipeline.py         # Original TextCNN training pipeline (5 epochs, 80/20 split)
-├── asag_data.py                 # Dataset loading, vocab building, TF-IDF
-│
-├── preprocessing.py             # Advanced text preprocessing (lemmatization, stemming, POS)
-├── distilbert_pipeline.py       # DistilBERT 5-fold cross-validation training
-├── ensemble_model.py            # Multi-model ensemble with calibrated confidence
-├── question_models.py           # Per-question Ridge regression models
-├── reference_answers.py         # Reference answer database + BERTScore
-├── scoring_improvements.py      # Calibrated scoring blend with adaptive weights
+├── asag_cnn_pipeline.py         # TextCNN training with 8 v3.0 improvements
 ├── content_correctness.py       # Keyword checking, word-order analysis, content override
 ├── grammar_detection.py         # POS-based grammar tolerance scoring
 │
 ├── feature_engineering.py       # 27 handcrafted features (lexical, syntactic, semantic)
-├── training_utils.py            # CombinedLoss, CosineScheduler, training helpers
-├── score_calibration.py         # Platt/Isotonic/Temperature scaling + ScoreRounder
-├── hyperparameter_tuning.py     # Optuna TPE hyperparameter search
+├── training_utils.py            # CombinedLoss, FocalMSELoss, ScoreRounder, training helpers
 ├── error_analysis.py            # Error analysis + A/B testing framework
+├── ensemble_model.py            # Multi-model ensemble with calibrated confidence
 │
 ├── test_model.py                # Standard model evaluation (random 80/20 split)
 ├── cross_question_test.py       # Cross-question generalisation evaluation
@@ -338,16 +327,6 @@ Options:
 
 # Skip GloVe embeddings (faster, lower accuracy)
 .venv\Scripts\python asag_cnn_pipeline.py --no-glove
-```
-
-### Hyperparameter Tuning (Optional)
-
-```bash
-# Tune the CNN pipeline (30 trials ≈ 20 min)
-.venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 30
-
-# Resume a study using a persistent SQLite database
-.venv\Scripts\python hyperparameter_tuning.py --target cnn --trials 50 --storage optuna_cnn.db
 ```
 
 ---
@@ -528,20 +507,6 @@ from feature_engineering import extract_all_features, FEATURE_NAMES
 
 vec = extract_all_features(student_answer, reference_answer)  # shape (27,)
 print(dict(zip(FEATURE_NAMES, vec)))
-```
-
-### Score Calibration (`score_calibration.py`)
-
-```python
-from score_calibration import EnsembleCalibrator, ScoreRounder
-
-cal = EnsembleCalibrator(methods=['platt', 'isotonic', 'temperature'])
-cal.fit(val_preds, val_labels)
-calibrated = cal.transform(test_preds)
-
-rounder = ScoreRounder(num_classes=3)
-rounder.fit(calibrated, val_labels)
-final_scores = rounder.predict_normalised(calibrated)
 ```
 
 ### Error Analysis (`error_analysis.py`)
