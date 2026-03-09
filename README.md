@@ -218,7 +218,7 @@ Ensure you have the following installed on your system:
 ### Step 1: Set up Python virtual environment
 
 ```bash
-cd c:\Users\fsmith\Documents\cnn_project
+cd c:\Users\user\Documents\cnn_project
 python -m venv .venv
 .venv\Scripts\activate
 ```
@@ -252,7 +252,7 @@ openpyxl              # Excel export (optional, for data analysis scripts)
 ### Step 3: Install Node.js dependencies (Frontend)
 
 ```bash
-cd c:\Users\fsmith\Documents\cnn_project\frontend
+cd c:\Users\user\Documents\cnn_project\frontend
 npm install
 ```
 
@@ -299,7 +299,7 @@ df.to_csv('asag2024_all.csv', index=False)
 - Use Git LFS to track large files instead of committing them directly. Example:
 
 ```powershell
-cd c:\Users\fsmith\Documents\cnn_project
+cd c:\Users\user\Documents\cnn_project
 git lfs install
 git lfs track "*.pth"
 git lfs track "*.vec"
@@ -572,7 +572,7 @@ After completing installation, run all three components in separate terminals:
 
 **Terminal 1: Backend API**
 ```bash
-cd c:\Users\fsmith\Documents\cnn_project
+cd c:\Users\user\Documents\cnn_project
 .venv\Scripts\activate
 .venv\Scripts\uvicorn backend:app --reload --port 8000
 ```
@@ -580,14 +580,14 @@ cd c:\Users\fsmith\Documents\cnn_project
 
 **Terminal 2: Frontend**
 ```bash
-cd c:\Users\fsmith\Documents\cnn_project\frontend
+cd c:\Users\user\Documents\cnn_project\frontend
 node_modules\.bin\react-scripts start
 ```
 ✓ If successful, browser opens **http://localhost:3000** automatically
 
 **Terminal 3 (optional): Run evaluations**
 ```bash
-cd c:\Users\fsmith\Documents\cnn_project
+cd c:\Users\user\Documents\cnn_project
 .venv\Scripts\activate
 
 # Standard evaluation (random 80/20 split)
