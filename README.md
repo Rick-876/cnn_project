@@ -7,7 +7,7 @@ This project implements an **Automatic Short Answer Grading (ASAG)** system usin
 The system consists of:
 - **Backend**: FastAPI REST API that combines a TextCNN model with WordNet synonym matching, DistilBERT semantic similarity, content correctness checking, and grammar tolerance scoring
 - **Frontend**: React web interface with 20 sample questions spanning Computer Science, Biology, and Science domains
-- **Training Pipeline**: TextCNN training with 5-epoch cross-validation and 80/20 split
+- **Training Pipeline**: TextCNN training with GloVe-300d embeddings, 3-fold stratified cross-validation, focal loss, class-weighted sampling, synonym augmentation, and label smoothing
 
 **Dataset**: [ASAG2024](https://huggingface.co/datasets/Meyerger/ASAG2024) — 15,190 graded short answers across 284 unique questions from university-level exams.
 
@@ -37,8 +37,8 @@ The system consists of:
                               │             ▼                │
                               │  ┌────────────────────────┐  │
                               │  │ TextCNN Model          │  │
-                              │  │ 512 conv + 1 sim +     │  │
-                              │  │ 27 handcrafted feats   │  │
+                              │  │ 1024 conv + 1 sim +    │  │
+                              │  │ 27 HC → 256 hidden     │  │
                               │  └──────────┬─────────────┘  │
                               │             │                │
                               │             ▼                │
@@ -80,7 +80,7 @@ The system consists of:
 
 ### Scoring Engine (Backend)
 
-- **TextCNN model** — 4-kernel CNN (sizes 2–5, 128 filters each) trained on ASAG2024 with 300-dim embeddings
+- **TextCNN model** — 4-kernel CNN (sizes 2–5, 256 filters each) with GloVe-300d pre-trained embeddings, hidden FC layer (1052→256→1), trained with focal loss and class-weighted sampling
 - **27 handcrafted features** — Lexical, syntactic, and semantic features extracted per answer (length, n-gram overlap, POS ratios, keyword density, etc.)
 - **WordNet synonym matching** — Expands vocabulary using synonyms, hypernyms, and hyponyms so answers with alternative phrasing are matched correctly
 - **DistilBERT semantic similarity** — Sentence-level cosine similarity via mean-pooled DistilBERT embeddings to capture meaning beyond exact words
@@ -105,7 +105,15 @@ The system consists of:
 
 ### Training Pipeline
 
-- **TextCNN pipeline** (`asag_cnn_pipeline.py`) — 5-epoch training with vocab building and 80/20 split
+- **TextCNN pipeline** (`asag_cnn_pipeline.py`) — Training with 8 accuracy improvements:
+  1. Pre-trained GloVe-300d embeddings (gensim, ~89% vocab coverage)
+  2. Class-weighted random sampling (inverse-frequency)
+  3. Stratified 3-fold cross-validation with held-out 20% test set
+  4. Synonym-based data augmentation for minority class (WordNet)
+  5. Wider convolutional filters (256 per kernel, was 128)
+  6. Hidden FC layer before output (1052 → 256 → 1)
+  7. Focal MSE loss for hard-example mining (gamma=1.5)
+  8. Label smoothing (epsilon=0.05)
 - **Hyperparameter tuning** (`hyperparameter_tuning.py`) — Optuna TPE search for CNN configurations
 - **Score calibration** (`score_calibration.py`) — Platt, isotonic, and temperature scaling with Nelder-Mead-optimised rounding thresholds
 
@@ -120,16 +128,16 @@ The system consists of:
 
 ## Model Performance
 
-### TextCNN Results (Random 80/20 Split)
+### TextCNN Results (Stratified 80/20 Split with Optimised Score Rounding)
 
 | Metric | Value |
 |--------|-------|
-| **QWK** | 0.261 |
-| **Accuracy** | 49.6% |
-| **MSE** | 0.140 |
-| **F1 (weighted)** | 0.493 |
+| **QWK** | 0.459 |
+| **Accuracy** | 53.6% |
+| **MSE** | 0.128 |
+| **F1 (weighted)** | 0.524 |
 | **Test Samples** | 3,038 |
-| **Training Time** | ~5 min |
+| **Training Time** | ~60 min (CPU, 3-fold CV + final model) |
 
 ---
 
@@ -217,7 +225,7 @@ pip install torch scikit-learn pandas numpy
 pip install fastapi "uvicorn[standard]" pydantic
 
 # NLP & transformer models
-pip install nltk transformers
+pip install nltk transformers gensim
 
 # Optional: for calibration, tuning, and evaluation
 pip install bert_score optuna scipy tqdm openpyxl
@@ -234,6 +242,7 @@ uvicorn[standard]     # ASGI server to run FastAPI
 pydantic              # Data validation (API request/response models)
 nltk                  # WordNet synonyms, lemmatization, POS tagging
 transformers          # HuggingFace DistilBERT for semantic similarity
+gensim                # GloVe-300d pre-trained word embeddings
 bert_score            # Semantic evaluation using BERT (optional)
 optuna                # Hyperparameter optimisation (optional)
 scipy                 # Score rounding optimisation (optional)
@@ -314,13 +323,22 @@ cd c:\Users\user\Documents\cnn_project
 
 ## Training
 
-### Train the TextCNN Model (~5 min)
+### Train the TextCNN Model (~60 min on CPU)
 
 ```bash
 .venv\Scripts\python asag_cnn_pipeline.py
 ```
 
-Trains for 5 epochs, saves weights to `textcnn_model.pth` and writes `test_set.csv`.
+Runs 3-fold stratified cross-validation, then trains a final model on all training data. Saves weights to `textcnn_model.pth` and writes `test_set.csv`.
+
+Options:
+```bash
+# Custom epochs and folds
+.venv\Scripts\python asag_cnn_pipeline.py --epochs 20 --folds 5
+
+# Skip GloVe embeddings (faster, lower accuracy)
+.venv\Scripts\python asag_cnn_pipeline.py --no-glove
+```
 
 ### Hyperparameter Tuning (Optional)
 
@@ -376,7 +394,7 @@ Health check — returns `{"status": "ASAG backend running", "endpoint": "POST /
 
 The backend uses a **calibrated hybrid approach** combining multiple scoring signals:
 
-1. **TextCNN Model Prediction** — TextCNN trained on 15,190 graded answers with 4 convolutional kernels (sizes 2–5), 128 filters each, plus a similarity score and 27 handcrafted features
+1. **TextCNN Model Prediction** — TextCNN trained on 15,190 graded answers with 4 convolutional kernels (sizes 2–5), 256 filters each, GloVe-300d pre-trained embeddings, plus a similarity score and 27 handcrafted features, with a hidden layer (1052 → 256 → 1)
 
 2. **Semantic Similarity Features** (8 features computed per answer):
    - **Unigram overlap** (weight: 10%) — Direct word overlap with reference
@@ -436,15 +454,15 @@ Off-topic answers return confidence = **0.97** (very confident they're wrong).
 
 | Layer | Details |
 |-------|---------|
-| Embedding | 300-dim, vocab-size × 300, padding_idx=0 |
-| Conv2D ×4 | Kernel sizes [2, 3, 4, 5], 128 filters each |
+| Embedding | 300-dim GloVe-300d pre-trained, vocab-size × 300, padding_idx=0 |
+| Conv2D ×4 | Kernel sizes [2, 3, 4, 5], 256 filters each |
 | Activation | ReLU |
 | Pooling | Max-over-time (per filter) |
 | Dropout | p = 0.4 |
-| Fully Connected | 540 → 1 (512 conv + 1 sim + 27 HC features) |
-| Output | Sigmoid (regression, 0–1) |
-| Loss | MSELoss |
-| Optimiser | Adam (lr = 1e-3) |
+| Hidden FC | 1052 → 256 (ReLU + Dropout 0.3) |
+| Output FC | 256 → 1, Sigmoid (regression, 0–1) |
+| Loss | Focal MSE (gamma=1.5) + QWK (alpha=0.3) |
+| Optimiser | Adam (lr = 1e-3, weight_decay = 0.01) |
 
 ### Semantic Encoder (DistilBERT)
 
@@ -570,14 +588,15 @@ Run the full integration test suite:
 
 | Metric | TextCNN |
 |--------|--------|
-| QWK | 0.261 |
-| Accuracy | 49.6% |
-| MSE | 0.140 |
-| F1-score | 0.493 |
-| Training time | ~5 min |
+| QWK | 0.459 |
+| Accuracy | 53.6% |
+| MSE | 0.128 |
+| F1-score | 0.524 |
+| Training time | ~60 min (CPU) |
 | Off-topic detection | Yes (3-signal) |
 | Synonym matching | WordNet + DistilBERT |
-| Feature input | 300-dim embeddings + 1 sim + 27 HC |
+| Embeddings | GloVe-300d pre-trained |
+| Feature input | 1024 conv + 1 sim + 27 HC → 256 hidden |
 
 ---
 

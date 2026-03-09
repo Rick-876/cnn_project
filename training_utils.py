@@ -89,30 +89,66 @@ class QWKLoss(nn.Module):
         return 1.0 - qwk_approx
 
 
-class CombinedLoss(nn.Module):
-    """
-    Combines MSE (or Huber) loss with QWK loss.
+class FocalMSELoss(nn.Module):
+    """Focal-style regression loss that emphasises hard examples.
 
-    total = alpha * mse_loss + (1 - alpha) * qwk_loss
+    Scales the squared error by |error|^gamma so that easy predictions
+    (small error) contribute less gradient and hard predictions (large
+    error near class boundaries) contribute more.
 
     Args:
-        alpha:       Weight for MSE-style loss (0 = pure QWK, 1 = pure MSE).
+        gamma: Focusing parameter (0 = standard MSE, higher = more focus
+               on hard examples). Recommended range: 1.0–2.0.
+    """
+
+    def __init__(self, gamma: float = 1.5):
+        super().__init__()
+        self.gamma = gamma
+
+    def forward(self, preds: torch.Tensor, targets: torch.Tensor,
+                sample_weights: torch.Tensor = None) -> torch.Tensor:
+        error = (preds - targets).abs().detach()   # detach to avoid double grad
+        focal_weight = (error + 1e-6) ** self.gamma
+        loss = focal_weight * (preds - targets) ** 2
+        if sample_weights is not None:
+            loss = loss * sample_weights
+        return loss.mean()
+
+
+class CombinedLoss(nn.Module):
+    """
+    Combines a regression loss with QWK loss.
+
+    total = alpha * regression_loss + (1 - alpha) * qwk_loss
+
+    The regression component can be MSE, Huber, or Focal MSE.
+
+    Args:
+        alpha:       Weight for regression loss (0 = pure QWK, 1 = pure MSE).
         num_classes: Number of grade classes for QWK calculation.
-        huber_delta: If > 0, use Huber loss instead of MSE.
+        huber_delta: If > 0 and focal_gamma == 0, use Huber loss.
+        focal_gamma: If > 0, use FocalMSELoss instead of Huber/MSE.
     """
 
     def __init__(self, alpha: float = 0.3, num_classes: int = 3,
-                 huber_delta: float = 0.5):
+                 huber_delta: float = 0.5, focal_gamma: float = 0.0):
         super().__init__()
         self.alpha = alpha
         self.qwk_loss = QWKLoss(num_classes=num_classes)
-        if huber_delta > 0:
+        self.use_focal = focal_gamma > 0
+        if self.use_focal:
+            self.regression_loss = FocalMSELoss(gamma=focal_gamma)
+        elif huber_delta > 0:
             self.regression_loss = nn.HuberLoss(delta=huber_delta)
         else:
             self.regression_loss = nn.MSELoss()
 
-    def forward(self, preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        reg_loss = self.regression_loss(preds, targets)
+    def forward(self, preds: torch.Tensor, targets: torch.Tensor,
+                sample_weights: torch.Tensor = None) -> torch.Tensor:
+        if self.use_focal:
+            reg_loss = self.regression_loss(preds, targets, sample_weights)
+        else:
+            reg_loss = self.regression_loss(preds, targets)
         qwk_component = self.qwk_loss(preds, targets)
         return self.alpha * reg_loss + (1.0 - self.alpha) * qwk_component
 

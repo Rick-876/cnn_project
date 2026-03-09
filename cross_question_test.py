@@ -28,13 +28,14 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
 )
+from feature_engineering import batch_extract_features, FEATURE_NAMES
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 FULL_DATA    = "asag2024_all.csv"
 MODEL_FILE   = "textcnn_model.pth"
 MAX_LEN      = 100
 EMBED_DIM    = 300
-NUM_FILTERS  = 128
+NUM_FILTERS  = 256
 FILTER_SIZES = [2, 3, 4, 5]
 BATCH_SIZE   = 32
 RANDOM_SEED  = 42
@@ -114,9 +115,18 @@ test_sims   = [
     for _, row in test_df.iterrows()
 ]
 
+print("Extracting handcrafted features for test set \u2026")
+test_hc = batch_extract_features(
+    test_df["provided_answer"].tolist(),
+    test_df["reference_answer"].tolist()
+)
+num_hc = test_hc.shape[1]
+print(f"  HC feature dim: {num_hc}")
+
 input_ids     = torch.tensor([encode_text(t) for t in test_texts], dtype=torch.long)
 labels_tensor = torch.tensor(test_labels, dtype=torch.float)
 sim_tensor    = torch.tensor(test_sims,   dtype=torch.float)
+hc_tensor     = torch.tensor(test_hc,     dtype=torch.float)
 
 # ── Step 5: Define model ───────────────────────────────────────────────────────
 class TextCNN(nn.Module):
@@ -157,7 +167,8 @@ with torch.no_grad():   # Disable gradient tracking
     for i in range(0, len(input_ids), BATCH_SIZE):
         batch_ids = input_ids[i : i + BATCH_SIZE].to(device)
         batch_sim = sim_tensor[i : i + BATCH_SIZE].to(device)
-        outputs   = model(batch_ids, batch_sim)
+        batch_hc  = hc_tensor[i : i + BATCH_SIZE].to(device)
+        outputs   = model(batch_ids, batch_sim, batch_hc)
         preds.extend(outputs.cpu().numpy())
         trues.extend(labels_tensor[i : i + BATCH_SIZE].numpy())
 

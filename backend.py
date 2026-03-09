@@ -35,7 +35,7 @@ FULL_DATA    = os.path.join(os.path.dirname(__file__), "asag2024_all.csv")
 MODEL_FILE   = os.path.join(os.path.dirname(__file__), "textcnn_model.pth")
 MAX_LEN      = 100
 EMBED_DIM    = 300
-NUM_FILTERS  = 128
+NUM_FILTERS  = 256
 FILTER_SIZES = [2, 3, 4, 5]
 
 # ── Helpers & global placeholders ─────────────────────────────────────────────
@@ -305,14 +305,16 @@ def find_closest_question(query: str) -> str:
 # ── Model definition (must match training) ───────────────────────────────────
 class TextCNN(nn.Module):
     def __init__(self, vocab_size, embed_dim=EMBED_DIM, num_filters=NUM_FILTERS,
-                 filter_sizes=FILTER_SIZES, num_hc=27, output_dim=1, dropout=0.4):
+                 filter_sizes=FILTER_SIZES, num_hc=27, dropout=0.4):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.convs = nn.ModuleList([
             nn.Conv2d(1, num_filters, (fs, embed_dim)) for fs in filter_sizes
         ])
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1 + num_hc, output_dim)
+        conv_out_dim = num_filters * len(filter_sizes) + 1 + num_hc  # 256*4+1+27=1052
+        self.fc1 = nn.Linear(conv_out_dim, 256)
+        self.fc2 = nn.Linear(256, 1)
 
     def forward(self, x, sim, hc):
         x = self.embedding(x).unsqueeze(1)
@@ -320,7 +322,10 @@ class TextCNN(nn.Module):
         pooled = [F.max_pool1d(c, c.size(2)).squeeze(2) for c in convs]
         cat = torch.cat(pooled, 1)
         cat = torch.cat([cat, sim.unsqueeze(1), hc], dim=1)
-        return torch.sigmoid(self.fc(self.dropout(cat))).squeeze(1)
+        cat = self.dropout(cat)
+        cat = F.relu(self.fc1(cat))
+        cat = F.dropout(cat, p=0.3, training=self.training)
+        return torch.sigmoid(self.fc2(cat)).squeeze(1)
 
 
 # ── Initialization (runs at app startup) ──────────────────────────────────────

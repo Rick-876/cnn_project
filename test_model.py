@@ -17,6 +17,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score,
     f1_score, confusion_matrix, classification_report,
 )
+from feature_engineering import batch_extract_features, FEATURE_NAMES
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 FULL_DATA  = "asag2024_all.csv"
@@ -25,7 +26,7 @@ MODEL_FILE = "textcnn_model.pth"
 # ── Hyperparameters (must match training) ──────────────────────────────────────
 MAX_LEN      = 100
 EMBED_DIM    = 300
-NUM_FILTERS  = 128
+NUM_FILTERS  = 256
 FILTER_SIZES = [2, 3, 4, 5]
 BATCH_SIZE   = 32
 
@@ -73,11 +74,19 @@ def reference_similarity(student: str, reference: str) -> float:
         return 0.0
     return len(s_words & r_words) / len(r_words)
 
-# Compute sim scores for test split
+# Compute sim scores and HC features for test split
 test_sims = [
     reference_similarity(row["provided_answer"], row["reference_answer"])
     for _, row in test_df_split.iterrows()
 ]
+
+print("Extracting handcrafted features for test set …")
+test_hc = batch_extract_features(
+    test_df_split["provided_answer"].tolist(),
+    test_df_split["reference_answer"].tolist()
+)
+num_hc = test_hc.shape[1]
+print(f"  HC feature dim: {num_hc}")
 
 words = [word for text in all_texts for word in tokenize(text)]
 vocab       = {word: i + 1 for i, (word, _) in enumerate(Counter(words).most_common())}
@@ -93,30 +102,36 @@ def encode_text(text):
 input_ids     = torch.tensor([encode_text(t) for t in test_texts], dtype=torch.long)
 labels_tensor = torch.tensor(test_labels, dtype=torch.float)
 sim_tensor    = torch.tensor(test_sims,   dtype=torch.float)
+hc_tensor     = torch.tensor(test_hc,     dtype=torch.float)
 
 # ── Step 3: Define model (identical architecture to training) ──────────────────
 class TextCNN(nn.Module):
     def __init__(self, vocab_size, embed_dim=EMBED_DIM, num_filters=NUM_FILTERS,
-                 filter_sizes=FILTER_SIZES, output_dim=1, dropout=0.5):
+                 filter_sizes=FILTER_SIZES, num_hc=27, dropout=0.4):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.convs = nn.ModuleList([
             nn.Conv2d(1, num_filters, (fs, embed_dim)) for fs in filter_sizes
         ])
         self.dropout = nn.Dropout(dropout)
-        # +1 for reference-similarity scalar feature
-        self.fc = nn.Linear(num_filters * len(filter_sizes) + 1, output_dim)
+        conv_out_dim = num_filters * len(filter_sizes) + 1 + num_hc
+        self.fc1 = nn.Linear(conv_out_dim, 256)
+        self.fc2 = nn.Linear(256, 1)
 
-    def forward(self, x, sim):
-        x   = self.embedding(x).unsqueeze(1)
+    def forward(self, x, sim, hc):
+        x = self.embedding(x).unsqueeze(1)
         cvs = [F.relu(c(x)).squeeze(3) for c in self.convs]
-        cat = torch.cat([F.max_pool1d(c, c.size(2)).squeeze(2) for c in cvs], 1)
-        cat = torch.cat([cat, sim.unsqueeze(1)], dim=1)
-        return self.fc(self.dropout(cat)).squeeze(1)
+        pooled = [F.max_pool1d(c, c.size(2)).squeeze(2) for c in cvs]
+        cat = torch.cat(pooled, 1)
+        cat = torch.cat([cat, sim.unsqueeze(1), hc], dim=1)
+        cat = self.dropout(cat)
+        cat = F.relu(self.fc1(cat))
+        cat = F.dropout(cat, p=0.3, training=self.training)
+        return torch.sigmoid(self.fc2(cat)).squeeze(1)
 
 # ── Step 4: Load saved weights ─────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model  = TextCNN(vocab_size=vocab_size).to(device)
+model  = TextCNN(vocab_size=vocab_size, num_hc=num_hc).to(device)
 model.load_state_dict(torch.load(MODEL_FILE, map_location=device))
 
 # ── Step 5: Evaluate ───────────────────────────────────────────────────────────
@@ -128,7 +143,8 @@ with torch.no_grad():  # Disable gradient tracking
     for i in range(0, len(input_ids), BATCH_SIZE):
         batch_ids = input_ids[i : i + BATCH_SIZE].to(device)
         batch_sim = sim_tensor[i : i + BATCH_SIZE].to(device)
-        outputs   = model(batch_ids, batch_sim)
+        batch_hc  = hc_tensor[i : i + BATCH_SIZE].to(device)
+        outputs   = model(batch_ids, batch_sim, batch_hc)
         preds.extend(outputs.cpu().numpy())
         trues.extend(labels_tensor[i : i + BATCH_SIZE].numpy())
 
